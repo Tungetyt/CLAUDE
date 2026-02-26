@@ -25,7 +25,14 @@
 16. [Dependency Management & Façades](#16-dependency-management--façades)
 17. [Frontend Error Reporting](#17-frontend-error-reporting)
 18. [Recommended Libraries](#18-recommended-libraries)
-19. [Checklist Before Every PR](#19-checklist-before-every-pr)
+19. [API Response Contract & RFC 7807](#19-api-response-contract--rfc-7807)
+20. [Cursor-Based Pagination](#20-cursor-based-pagination)
+21. [Data Integrity](#21-data-integrity)
+22. [HTTP Optimisation](#22-http-optimisation)
+23. [Hono-Specific Patterns](#23-hono-specific-patterns)
+24. [Frontend Performance](#24-frontend-performance)
+25. [Explicit Resource Management](#25-explicit-resource-management)
+26. [Checklist Before Every PR](#26-checklist-before-every-pr)
 
 ---
 
@@ -1275,6 +1282,10 @@ window.addEventListener("error", (event) => {
 | **CSS lint** | `stylelint` | Enforce CSS conventions |
 | **Linting + Formatting** | `biome` | Lint + format in one tool; extremely fast, no config sprawl |
 | **Git hooks** | `husky` + Biome `--staged` flag | Pre-commit quality gates |
+| **Server framework** | `hono` | Lightweight, edge-ready, type-safe routes + `hc` RPC client |
+| **Hono validation** | `@hono/zod-validator` | Request validation middleware with Zod type inference |
+| **Virtualisation** | `@tanstack/react-virtual` (via façade) | Windowed rendering for large lists, tables, grids |
+| **Web Vitals** | `web-vitals` | Measure CLS, LCP, INP; report to monitoring |
 | **Env parsing** | `zod` (built-in, §3.3) | Fail-fast env validation |
 | **ID generation** | `nanoid` or `uuid` | Collision-resistant IDs |
 
@@ -1282,7 +1293,555 @@ window.addEventListener("error", (event) => {
 
 ---
 
-## 19. Checklist Before Every PR
+## 19. API Response Contract & RFC 7807
+
+### 19.1 Discriminated Union Response Envelope
+
+Every API endpoint returns a discriminated union so the FE can narrow with a single check:
+
+```ts
+type ApiResponse<T> =
+  | { readonly status: "success"; readonly data: T }
+  | { readonly status: "error"; readonly error: ProblemDetail };
+```
+
+### 19.2 RFC 7807 Problem Details for Errors
+
+All error responses use `application/problem+json`:
+
+```ts
+interface ProblemDetail {
+  readonly type: string;        // URI reference identifying the error type
+  readonly title: string;       // Short human-readable summary
+  readonly status: number;      // HTTP status code
+  readonly detail?: string;     // Explanation specific to this occurrence
+  readonly instance?: string;   // URI identifying this specific occurrence
+  readonly traceId: string;     // Correlation ID for debugging
+  readonly errors?: ReadonlyArray<{
+    readonly field: string;
+    readonly message: string;
+  }>;
+}
+
+// Hono helper
+function problemResponse(c: Context, error: DomainError): Response {
+  const status = domainErrorToHttpStatus(error);
+  return c.json(
+    {
+      status: "error" as const,
+      error: {
+        type: `https://api.example.com/errors/${error._tag}`,
+        title: error._tag,
+        status,
+        detail: error.message,
+        traceId: getTraceId(),
+      },
+    },
+    status,
+  );
+}
+```
+
+---
+
+## 20. Cursor-Based Pagination
+
+Prefer **cursor/keyset** pagination over offset-based. Offset pagination degrades on large tables and produces inconsistent results under concurrent writes.
+
+```ts
+// Shared types
+interface CursorPage<T> {
+  readonly items: ReadonlyArray<T>;
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
+const PaginationParamsSchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).catch(20),
+});
+type PaginationParams = z.infer<typeof PaginationParamsSchema>;
+
+// Drizzle query example
+async function listOrders(
+  params: PaginationParams,
+): Promise<CursorPage<Order>> {
+  const rows = await db
+    .select()
+    .from(orders)
+    .where(params.cursor ? gt(orders.id, params.cursor) : undefined)
+    .orderBy(asc(orders.id))
+    .limit(params.limit + 1); // fetch one extra to detect hasMore
+
+  const hasMore = rows.length > params.limit;
+  const items = hasMore ? rows.slice(0, -1) : rows;
+
+  return {
+    items,
+    nextCursor: items.at(-1)?.id ?? null,
+    hasMore,
+  };
+}
+```
+
+---
+
+## 21. Data Integrity
+
+### 21.1 Optimistic Locking
+
+Use a `version` column on every mutable entity. Increment on every write. Return `409 Conflict` when the version in the `WHERE` clause matches zero rows.
+
+```ts
+// Drizzle example
+async function updateOrder(
+  id: OrderId,
+  data: UpdateOrderInput,
+  expectedVersion: number,
+): Promise<Result<Order, ConflictError | NotFoundError>> {
+  const result = await db
+    .update(orders)
+    .set({ ...data, version: expectedVersion + 1 })
+    .where(and(eq(orders.id, id), eq(orders.version, expectedVersion)))
+    .returning();
+
+  if (result.length === 0) {
+    const exists = await db.select({ id: orders.id }).from(orders).where(eq(orders.id, id));
+    return exists.length === 0
+      ? err(new NotFoundError("Order", id))
+      : err(new ConflictError("Order was modified by another request. Refresh and retry."));
+  }
+
+  return ok(result[0]!);
+}
+```
+
+### 21.2 Soft Deletes
+
+**Never hard-delete user data.** Use a `deletedAt` column.
+
+```ts
+// Schema
+const users = pgTable("users", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  email: text("email").notNull(),
+  deletedAt: timestamp("deleted_at"),
+  // ...
+});
+
+// All queries exclude soft-deleted rows by default
+const activeUsers = () =>
+  db.select().from(users).where(isNull(users.deletedAt));
+
+// "Delete" = set the timestamp
+const softDelete = (id: UserId) =>
+  db.update(users).set({ deletedAt: new Date() }).where(eq(users.id, id));
+```
+
+### 21.3 Audit Trail
+
+Log every mutation to an append-only audit table:
+
+```ts
+const auditLog = pgTable("audit_log", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  entityType: text("entity_type").notNull(),  // e.g. "Order"
+  entityId: text("entity_id").notNull(),
+  action: text("action").notNull(),            // "create" | "update" | "delete"
+  actorId: text("actor_id").notNull(),
+  before: jsonb("before"),                     // snapshot before mutation
+  after: jsonb("after"),                       // snapshot after mutation
+  timestamp: timestamp("timestamp").defaultNow().notNull(),
+  traceId: text("trace_id"),
+});
+```
+
+Write the audit row **in the same transaction** as the mutation.
+
+### 21.4 Outbox Pattern for Reliable Events
+
+When a domain event must trigger side effects (email, webhook, analytics), write the event to an `outbox` table **in the same DB transaction** as the mutation. A background poller or CDC (Change Data Capture) picks it up and publishes.
+
+```ts
+const outbox = pgTable("outbox", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  processedAt: timestamp("processed_at"),
+});
+
+// Inside a transaction:
+await db.transaction(async (tx) => {
+  await tx.insert(orders).values(newOrder);
+  await tx.insert(outbox).values({
+    eventType: "order.created",
+    payload: newOrder,
+  });
+});
+```
+
+This guarantees that either **both** the order and the event are persisted, or **neither** is — preventing lost or phantom events.
+
+---
+
+## 22. HTTP Optimisation
+
+### 22.1 ETags & Conditional Requests
+
+Return `ETag` headers on GET responses. Honour `If-None-Match` to return `304 Not Modified`.
+
+```ts
+// Hono middleware
+async function etagMiddleware(c: Context, next: Next) {
+  await next();
+
+  if (c.req.method !== "GET" || c.res.status !== 200) return;
+
+  const body = await c.res.clone().text();
+  const etag = `"${await hash(body, "sha256")}"`;
+
+  c.header("ETag", etag);
+
+  if (c.req.header("If-None-Match") === etag) {
+    c.res = new Response(null, { status: 304 });
+  }
+}
+```
+
+### 22.2 Compression
+
+Enable Brotli / gzip for all responses. Use Hono's `compress` middleware:
+
+```ts
+import { compress } from "hono/compress";
+
+app.use("*", compress());
+```
+
+For fine-grained control, set `Content-Encoding` conditionally based on `Accept-Encoding`.
+
+### 22.3 Request Coalescing / Deduplication
+
+When multiple identical GET requests arrive simultaneously (thundering herd on cache miss), execute only once and share the result:
+
+```ts
+class RequestCoalescer {
+  private readonly inflight = new Map<string, Promise<unknown>>();
+
+  async dedupe<T>(key: string, fn: () => Promise<T>): Promise<T> {
+    const existing = this.inflight.get(key);
+    if (existing) return existing as Promise<T>;
+
+    const promise = fn().finally(() => this.inflight.delete(key));
+    this.inflight.set(key, promise);
+    return promise;
+  }
+}
+
+// Usage in a query handler
+const coalescer = new RequestCoalescer();
+
+async function getUser(id: UserId) {
+  return coalescer.dedupe(`user:${id}`, () => repo.findById(id));
+}
+```
+
+### 22.4 AbortController Everywhere
+
+Pass `AbortSignal` to **every** async operation. Cancel in-flight work on route change (FE) or request abort (BE).
+
+```ts
+// Hono — propagate client abort
+app.get("/orders/:id", async (c) => {
+  const signal = c.req.raw.signal; // AbortSignal from the incoming request
+  const order = await orderService.getById(c.req.param("id"), { signal });
+  // If client disconnects, signal fires and downstream calls can abort
+  return c.json({ status: "success", data: order });
+});
+
+// FE — cancel on component unmount
+useEffect(() => {
+  const controller = new AbortController();
+  fetchOrders({ signal: controller.signal });
+  return () => controller.abort();
+}, []);
+```
+
+---
+
+## 23. Hono-Specific Patterns
+
+### 23.1 Type-Safe Routes with `hc` Client
+
+Leverage Hono's path-parameter inference and the `hc` RPC client for **end-to-end type-safe API calls without codegen**.
+
+```ts
+// Backend — define typed routes
+const app = new Hono()
+  .get("/users/:id", async (c) => {
+    const id = c.req.param("id");
+    return c.json({ id, name: "Alice" });
+  })
+  .post("/users", zValidator("json", CreateUserSchema), async (c) => {
+    const body = c.req.valid("json");
+    return c.json({ id: "new-id", ...body }, 201);
+  });
+
+export type AppType = typeof app;
+
+// Frontend — fully typed client (no codegen)
+import { hc } from "hono/client";
+import type { AppType } from "../server/app";
+
+const client = hc<AppType>("http://localhost:3000");
+
+// client.users[":id"].$get({ param: { id: "123" } }) — fully typed params, response, etc.
+const res = await client.users[":id"].$get({ param: { id: "123" } });
+const data = await res.json(); // { id: string; name: string } — inferred!
+```
+
+### 23.2 Streaming Responses
+
+Use `c.stream()` or `c.streamText()` for large payloads, AI responses, or server-sent events:
+
+```ts
+app.get("/export/orders", async (c) => {
+  return c.stream(async (stream) => {
+    let cursor: string | undefined;
+    do {
+      const page = await listOrders({ cursor, limit: 100 });
+      for (const order of page.items) {
+        await stream.write(JSON.stringify(order) + "\n");
+      }
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+  });
+});
+```
+
+### 23.3 Zod Validator Middleware
+
+Use `@hono/zod-validator` to validate request bodies, query params, and route params in a single declaration:
+
+```ts
+import { zValidator } from "@hono/zod-validator";
+
+app.post(
+  "/orders",
+  zValidator("json", CreateOrderSchema),
+  zValidator("header", z.object({ "idempotency-key": z.string().uuid() })),
+  async (c) => {
+    const body = c.req.valid("json");   // fully typed
+    const headers = c.req.valid("header");
+    // ...
+  },
+);
+```
+
+---
+
+## 24. Frontend Performance
+
+### 24.1 List Virtualisation
+
+For any list that **could** exceed ~50 visible items, use **virtualisation** (windowing). Render only the items in the viewport + a small overscan buffer.
+
+```ts
+// Use @tanstack/react-virtual (behind a façade)
+import { useVirtualizer } from "@tanstack/react-virtual";
+
+function VirtualList({ items }: { items: ReadonlyArray<Item> }) {
+  const parentRef = useRef<HTMLDivElement>(null);
+
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 48,   // estimated row height in px
+    overscan: 5,
+  });
+
+  return (
+    <div ref={parentRef} style={{ height: "100%", overflow: "auto" }}>
+      <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+        {virtualizer.getVirtualItems().map((row) => (
+          <div
+            key={row.key}
+            style={{
+              position: "absolute",
+              top: 0,
+              transform: `translateY(${row.start}px)`,
+              height: `${row.size}px`,
+              width: "100%",
+            }}
+          >
+            <ListItem item={items[row.index]!} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+```
+
+**Rules:**
+- Virtualise **tables, feeds, select dropdowns, and autocomplete results** when the potential item count is unbounded.
+- Pair with cursor-based pagination (§20) for infinite scroll.
+- Always provide `estimateSize` — avoid layout thrashing.
+
+### 24.2 Optimistic Updates
+
+Apply mutations to the UI **immediately** before the server confirms, then reconcile.
+
+```ts
+// Pattern using a state machine
+type OptimisticState<T> =
+  | { status: "idle"; data: T }
+  | { status: "pending"; data: T; optimistic: T; rollback: T }
+  | { status: "confirmed"; data: T }
+  | { status: "rolledBack"; data: T; error: DomainError };
+
+// Example: toggling a "like"
+async function toggleLike(postId: PostId, liked: boolean) {
+  // 1. Apply optimistic update immediately
+  updatePostCache(postId, (post) => ({
+    ...post,
+    liked,
+    likeCount: post.likeCount + (liked ? 1 : -1),
+  }));
+
+  // 2. Send request
+  const result = await api.post(`/posts/${postId}/like`, { liked });
+
+  // 3. Reconcile
+  if (isErr(result)) {
+    // Roll back to previous state
+    updatePostCache(postId, (post) => ({
+      ...post,
+      liked: !liked,
+      likeCount: post.likeCount + (liked ? -1 : 1),
+    }));
+    reportError({ message: "Failed to update like", severity: "warning" });
+  }
+}
+```
+
+**Rules:**
+- Always implement **rollback** on failure.
+- Show a subtle, non-blocking toast on rollback — never break the flow.
+- Use optimistic updates for low-risk, high-frequency actions (likes, toggles, reordering).
+- For high-risk actions (payments, deletes), wait for server confirmation.
+
+### 24.3 Skeleton Loading States
+
+**Never** show raw spinners. Use skeleton screens that match the layout of the content being loaded.
+
+```css
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-dim) 25%,
+    var(--color-surface) 50%,
+    var(--color-surface-dim) 75%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.5s infinite;
+  border-radius: var(--radius-sm);
+}
+
+@keyframes skeleton-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton { animation: none; }
+}
+```
+
+### 24.4 Web Vitals Monitoring
+
+Capture Core Web Vitals (CLS, LCP, INP) and send to a dedicated endpoint:
+
+```ts
+import { onCLS, onLCP, onINP } from "web-vitals";
+
+function sendVital(metric: { name: string; value: number; id: string }) {
+  navigator.sendBeacon(
+    "/api/v1/web-vitals",
+    JSON.stringify({
+      name: metric.name,
+      value: metric.value,
+      id: metric.id,
+      url: window.location.href,
+      timestamp: new Date().toISOString(),
+      sessionId: getSessionId(),
+    }),
+  );
+}
+
+onCLS(sendVital);
+onLCP(sendVital);
+onINP(sendVital);
+```
+
+Alert when any metric regresses beyond the "good" threshold for > 5% of sessions.
+
+### 24.5 Performance Budgets
+
+Set budgets in CI (Lighthouse CI or `bundlesize`):
+
+| Metric | Budget |
+|---|---|
+| Total JS bundle (gzip) | ≤ 150 KB |
+| LCP | ≤ 2.5 s |
+| CLS | ≤ 0.1 |
+| INP | ≤ 200 ms |
+| Total Blocking Time | ≤ 300 ms |
+
+Fail the pipeline if any budget is exceeded. Budgets are non-negotiable.
+
+---
+
+## 25. Explicit Resource Management
+
+Use the `using` keyword (TC39 Explicit Resource Management, TS 5.2+) for any resource that must be cleaned up: DB connections, file handles, temp files, locks.
+
+```ts
+// Drizzle transaction with auto-dispose
+async function processOrder(id: OrderId) {
+  await using tx = await db.transaction();
+  // tx is automatically rolled back if an error is thrown,
+  // or committed if the block completes normally
+
+  const order = await tx.select().from(orders).where(eq(orders.id, id));
+  // ...
+}
+
+// Temp file that cleans itself up
+class TempFile implements AsyncDisposable {
+  constructor(readonly path: string) {}
+
+  async [Symbol.asyncDispose]() {
+    await Bun.file(this.path).exists() && await unlink(this.path);
+  }
+}
+
+async function processUpload(file: File) {
+  await using tmp = new TempFile(`/tmp/${crypto.randomUUID()}`);
+  await Bun.write(tmp.path, file);
+  // ... process file
+} // tmp.path is automatically deleted here
+```
+
+**Rules:**
+- Prefer `using` / `await using` over manual `try/finally` cleanup.
+- Implement `Disposable` / `AsyncDisposable` on custom resource wrappers.
+- Bun supports this natively.
+
+---
+
+## 26. Checklist Before Every PR
 
 - [ ] All new code is covered by tests (unit + integration as appropriate).
 - [ ] Error paths are tested explicitly.
@@ -1306,6 +1865,22 @@ window.addEventListener("error", (event) => {
 - [ ] No useless temp variables; prefer direct returns and FP chaining.
 - [ ] FE critical errors report to `/api/v1/client-errors`.
 - [ ] No high/critical vulnerabilities (use `socket.dev` or equivalent supply-chain scanning).
+- [ ] API errors use RFC 7807 `ProblemDetail` format.
+- [ ] All list endpoints use cursor-based pagination.
+- [ ] Mutable entities have `version` column (optimistic locking).
+- [ ] No hard deletes — use `deletedAt` soft-delete.
+- [ ] Mutations write an audit trail row in the same transaction.
+- [ ] Side-effecting domain events use the outbox pattern.
+- [ ] GET responses include `ETag`; honour `If-None-Match`.
+- [ ] Response compression (Brotli/gzip) enabled.
+- [ ] `AbortSignal` propagated through all async chains.
+- [ ] Hono routes use `hc<AppType>` for type-safe FE client.
+- [ ] Large lists (> 50 items) are virtualised.
+- [ ] Optimistic updates have rollback logic on failure.
+- [ ] Skeleton loading states — no raw spinners.
+- [ ] Web Vitals (CLS, LCP, INP) reported to monitoring.
+- [ ] Performance budgets enforced in CI.
+- [ ] `using` / `await using` for resources requiring cleanup.
 
 ---
 
