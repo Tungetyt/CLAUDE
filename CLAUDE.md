@@ -49,7 +49,7 @@ Organise every bounded context into concentric layers. **Dependencies point inwa
 
 - **Domain** – pure functions, zero I/O, zero framework imports.
 - **Application** – orchestrates domain logic; defines port interfaces (repositories, gateways).
-- **Infrastructure** – adapters that implement ports (Prisma repo, Axios HTTP client, Redis cache).
+- **Infrastructure** – adapters that implement ports (Drizzle repo, ky HTTP client, Redis cache).
 
 ### 1.2 CQRS (Command / Query Separation)
 
@@ -71,7 +71,7 @@ features/
     ports/
       orderRepository.port.ts     # interface only
     adapters/
-      prismaOrderRepository.ts    # implements port
+      drizzleOrderRepository.ts   # implements port
     validation/
       createOrder.schema.ts       # Zod schema
     __tests__/
@@ -103,8 +103,8 @@ src/
     monitoring/    # alert helpers
     errors/        # error taxonomy
   infrastructure/
-    http/          # Express / Fastify adapter
-    db/            # Prisma client, migrations
+    http/          # Hono adapter
+    db/            # Drizzle client, migrations
     queue/         # BullMQ adapter
     cache/         # Redis adapter
   ui/              # (frontend)
@@ -143,8 +143,9 @@ const CreateUserSchema = z.object({
 });
 type CreateUserInput = z.infer<typeof CreateUserSchema>;
 
-// ✅ Infer from Prisma
-type User = Prisma.UserGetPayload<{ include: { posts: true } }>;
+// ✅ Infer from Drizzle schema (single source of truth)
+type User = typeof users.$inferSelect;
+type NewUser = typeof users.$inferInsert;
 
 // ✅ Infer from constants
 const ROLES = ["admin", "editor", "viewer"] as const;
@@ -295,7 +296,7 @@ Validate **every** trust boundary:
 | URL hash / fragment | Zod |
 | WebSocket messages | Zod |
 | File uploads | MIME type, size, extension, magic bytes |
-| Database reads | Trust Prisma types, but validate at ingestion |
+| Database reads | Trust Drizzle types, but validate at ingestion |
 
 ### 3.2 Zod `.catch()` for Optional Fields
 
@@ -514,8 +515,8 @@ For complex UI state machines, consider using **XState** (via a façade — see 
 
 | Layer | Tool | Proportion | What It Covers |
 |---|---|---|---|
-| **Unit** | Vitest | ~70% | Pure functions, domain logic, value objects, utilities, state transitions |
-| **Integration** | Vitest + MSW + Testcontainers | ~20% | Use-case handlers with real adapters, DB queries, cross-module interactions |
+| **Unit** | `bun:test` | ~70% | Pure functions, domain logic, value objects, utilities, state transitions |
+| **Integration** | `bun:test` + MSW + Testcontainers | ~20% | Use-case handlers with real adapters, DB queries, cross-module interactions |
 | **E2E** | Playwright | ~10% | Critical user journeys, happy + error paths through the full stack |
 
 ### 6.2 Test-Driven Development (TDD) Cycle
@@ -550,7 +551,7 @@ describe("toEmail", () => {
 
 ### 6.4 Integration Tests — Use MSW, Not Manual Mocks
 
-**Never** use `jest.mock()` or `vi.mock()` to mock HTTP calls. Use **MSW** (Mock Service Worker) to intercept at the network level.
+**Never** use `jest.mock()` or `mock.module()` to mock HTTP calls. Use **MSW** (Mock Service Worker) to intercept at the network level.
 
 ```ts
 import { setupServer } from "msw/node";
@@ -704,7 +705,7 @@ All CSS starts from the smallest viewport and adds complexity upward.
 ### 8.2 Automated Enforcement
 
 - Run `axe-core` checks in every Playwright E2E test.
-- Add `eslint-plugin-jsx-a11y` to the lint pipeline.
+- Enable the `useSemanticElements`, `useValidAriaRole`, `useValidAriaValues`, and other a11y rules in **Biome**'s linter. Supplement with `@axe-core/playwright` in E2E.
 - Include a11y checks in CI: `pa11y-ci` or Lighthouse CI.
 
 ---
@@ -715,7 +716,7 @@ All CSS starts from the smallest viewport and adds complexity upward.
 
 - **Validate all inputs** at trust boundaries (§3).
 - **Sanitise HTML output** — use a library like `DOMPurify` behind a façade.
-- **Parameterised queries only** — never concatenate user input into SQL. Prisma handles this by default.
+- **Parameterised queries only** — never concatenate user input into SQL. Drizzle handles this by default.
 - **Escape user-generated content** rendered in templates.
 
 ### 9.2 Authentication & Authorization
@@ -741,8 +742,8 @@ Permissions-Policy: camera=(), microphone=(), geolocation=()
 
 ### 9.4 Dependency Security
 
-- `npm audit` in CI — fail on **high** or **critical** vulnerabilities.
-- Pin exact versions in `package-lock.json`.
+- `bun audit` (or `bun pm pack --dry-run` + `socket.dev`) in CI — fail on **high** or **critical** vulnerabilities.
+- Pin exact versions in `bun.lock`.
 - Use `socket.dev` or `snyk` for supply-chain monitoring.
 
 ### 9.5 Secrets
@@ -829,7 +830,7 @@ Configure in your monitoring platform (Datadog, Grafana, CloudWatch):
 ### 10.4 Correlation
 
 - Generate a `traceId` (UUID v4) at the entry point of every request.
-- Propagate it via `AsyncLocalStorage` (Node.js) so every log within that request lifecycle includes it automatically.
+- Propagate it via `AsyncLocalStorage` (Bun supports the Node.js `async_hooks` API) so every log within that request lifecycle includes it automatically.
 - FE includes a `requestId` header that maps to the BE `traceId`.
 
 ---
@@ -923,7 +924,7 @@ async function getOrderByIdHandler(
 Apply at the infrastructure layer (reverse proxy / API gateway) **and** at the application layer as defense-in-depth.
 
 ```ts
-// Application-level rate limiting (e.g. express-rate-limit behind a façade)
+// Application-level rate limiting (e.g. hono-rate-limiter or rate-limiter-flexible behind a façade)
 import type { RateLimiterConfig } from "./rateLimiter.port";
 
 const apiRateLimiter: RateLimiterConfig = {
@@ -942,7 +943,7 @@ const apiRateLimiter: RateLimiterConfig = {
 
 ### 12.2 Load Balancing
 
-- Use a reverse proxy (NGINX, Caddy, or cloud ALB) in front of multiple Node.js instances.
+- Use a reverse proxy (NGINX, Caddy, or cloud ALB) in front of multiple Bun instances.
 - Ensure the app is **stateless** — all state lives in the DB / Redis / external store.
 - Health check endpoint: `GET /health` returns `200` with `{ status: "ok", uptime, version }`.
 
@@ -971,27 +972,24 @@ All `POST`, `PUT`, `PATCH` endpoints that create resources or trigger side effec
 
 ```ts
 // Middleware
-async function idempotencyMiddleware(req: Request, res: Response, next: NextFunction) {
-  const idempotencyKey = req.headers["idempotency-key"];
+// Hono middleware
+async function idempotencyMiddleware(c: Context, next: Next) {
+  const idempotencyKey = c.req.header("idempotency-key");
   if (!idempotencyKey) return next();
 
   const cachedResponse = await idempotencyStore.get(idempotencyKey);
   if (cachedResponse) {
-    res.status(cachedResponse.statusCode).json(cachedResponse.body);
-    return;
+    return c.json(cachedResponse.body, cachedResponse.statusCode);
   }
 
-  // Wrap res.json to capture the response
-  const originalJson = res.json.bind(res);
-  res.json = (body: unknown) => {
-    idempotencyStore.set(idempotencyKey, {
-      statusCode: res.statusCode,
-      body,
-    }, 24 * 60 * 60 * 1000); // 24h TTL
-    return originalJson(body);
-  };
+  await next();
 
-  next();
+  // Capture response after handler runs
+  const body = await c.res.clone().json();
+  idempotencyStore.set(idempotencyKey, {
+    statusCode: c.res.status,
+    body,
+  }, 24 * 60 * 60 * 1000); // 24h TTL
 }
 ```
 
@@ -1098,7 +1096,7 @@ const activeAdminEmails = users
 
 ### 16.1 Façade Every External Library
 
-Every external dependency — including "staples" like React, Zod, Prisma, Axios — is accessed through a **thin façade**. This provides:
+Every external dependency — including "staples" like React, Zod, Drizzle, ky — is accessed through a **thin façade**. This provides:
 
 1. **Replaceability** — swap the underlying library without touching feature code.
 2. **Testability** — mock the façade interface in tests.
@@ -1108,7 +1106,7 @@ Every external dependency — including "staples" like React, Zod, Prisma, Axios
 src/shared/lib/
   http/
     httpClient.port.ts        # interface
-    axiosHttpClient.ts        # adapter
+    kyHttpClient.ts           # adapter (default)
     fetchHttpClient.ts        # alternative adapter
     httpClient.facade.ts      # factory that returns the active adapter
   validation/
@@ -1116,7 +1114,7 @@ src/shared/lib/
     zodValidator.ts
   orm/
     orm.port.ts
-    prismaOrm.ts
+    drizzleOrm.ts
   ui/
     uiFramework.port.ts       # abstracts React-specific APIs
     reactUiFramework.ts
@@ -1147,8 +1145,8 @@ interface RequestOptions {
   readonly signal?: AbortSignal;
 }
 
-// src/shared/lib/http/axiosHttpClient.ts — implements HttpClient using axios
-// Feature code only imports HttpClient, never axios directly
+// src/shared/lib/http/kyHttpClient.ts — implements HttpClient using ky
+// Feature code only imports HttpClient, never ky directly
 ```
 
 ---
@@ -1259,28 +1257,28 @@ window.addEventListener("error", (event) => {
 |---|---|---|
 | **Utility Types** | `type-fest` | Rich type utilities; do not re-invent |
 | **Validation** | `zod` (via façade) | Runtime + static type inference |
-| **HTTP** | `ky` or `axios` (via façade) | Retry, timeout, interceptors |
+| **HTTP** | `ky` (via façade) | Retry, timeout, hooks, tiny bundle |
 | **API mocking** | `msw` | Network-level interception for tests |
-| **Testing** | `vitest` | Vite-native, fast, ESM |
+| **Runtime & Package Manager** | `bun` | Fast runtime, built-in test runner, drop-in Node.js replacement |
+| **Testing** | `bun:test` | Built-in, Jest-compatible API, fast |
 | **E2E** | `playwright` | Cross-browser, reliable |
-| **Coverage** | `v8` (via vitest) | Native V8 coverage, fast |
+| **Coverage** | `v8` (via `bun:test --coverage`) | Native V8 coverage, fast |
 | **State machines** | `xstate` (via façade) | Formal statecharts |
 | **Data structures** | `mnemonist` or `immutable`| Battle-tested advanced data structures |
 | **Date/time** | `temporal` polyfill or `date-fns` (via façade) | Immutable, tree-shakeable |
-| **ORM** | `prisma` (via façade) | Type-safe, migrations |
+| **ORM** | `drizzle-orm` + `drizzle-kit` (via façade) | Type-safe, SQL-like API, lightweight, schema-as-code |
 | **Logging** | `pino` (via façade) | Fast, structured JSON logging |
 | **Rate limiting** | `rate-limiter-flexible` | In-memory + Redis support |
 | **Sanitisation** | `DOMPurify` (via façade) | XSS prevention |
-| **a11y lint** | `eslint-plugin-jsx-a11y` | Catches a11y issues at lint time |
+| **a11y lint** | Biome built-in a11y rules | Catches a11y issues at lint time (no extra plugin) |
 | **a11y test** | `@axe-core/playwright` | Runtime a11y checks in E2E |
 | **CSS lint** | `stylelint` | Enforce CSS conventions |
-| **Linting** | `eslint` + `@typescript-eslint` | Strict TS linting |
-| **Formatting** | `prettier` | Consistent formatting |
-| **Git hooks** | `husky` + `lint-staged` | Pre-commit quality gates |
+| **Linting + Formatting** | `biome` | Lint + format in one tool; extremely fast, no config sprawl |
+| **Git hooks** | `husky` + Biome `--staged` flag | Pre-commit quality gates |
 | **Env parsing** | `zod` (built-in, §3.3) | Fail-fast env validation |
 | **ID generation** | `nanoid` or `uuid` | Collision-resistant IDs |
 
-> **Rule:** Before writing any non-trivial data structure or algorithm from scratch, search npm for a well-maintained library. Prefer installing `mnemonist` over hand-rolling an AVL tree, LRU cache, or trie.
+> **Rule:** Before writing any non-trivial data structure or algorithm from scratch, search for a well-maintained library (`bun add`). Prefer installing `mnemonist` over hand-rolling an AVL tree, LRU cache, or trie.
 
 ---
 
@@ -1292,7 +1290,7 @@ window.addEventListener("error", (event) => {
 - [ ] Zod schemas validate all trust boundaries.
 - [ ] Optional Zod fields use `.catch()` with sane defaults.
 - [ ] No `any` — use `unknown` + narrowing.
-- [ ] All types inferred from source of truth (Zod, Prisma, `as const`).
+- [ ] All types inferred from source of truth (Zod, Drizzle, `as const`).
 - [ ] Branded types with predicates for domain identifiers.
 - [ ] Exhaustiveness checking with `assertNever` on discriminated unions.
 - [ ] `ReadonlyDeep` on domain types.
@@ -1300,14 +1298,14 @@ window.addEventListener("error", (event) => {
 - [ ] a11y: semantic HTML, labels, contrast, keyboard nav.
 - [ ] Security: no secrets in code, CSP headers, parameterised queries.
 - [ ] Wide structured logs with `traceId` on all operations.
-- [ ] HTTP mocks use MSW, not `vi.mock`.
+- [ ] HTTP mocks use MSW, not `mock.module()`.
 - [ ] External libraries accessed through façades.
 - [ ] State machines for entities with lifecycle.
 - [ ] Idempotency-Key on mutating endpoints.
 - [ ] In-memory cache in front of repeated GET / DB reads.
 - [ ] No useless temp variables; prefer direct returns and FP chaining.
 - [ ] FE critical errors report to `/api/v1/client-errors`.
-- [ ] `npm audit` shows no high/critical vulnerabilities.
+- [ ] No high/critical vulnerabilities (use `socket.dev` or equivalent supply-chain scanning).
 
 ---
 
@@ -1335,7 +1333,7 @@ window.addEventListener("error", (event) => {
      }
    }
    ```
-9. **Biome or ESLint** must be configured with the strictest ruleset and run on pre-commit (via `husky` + `lint-staged`).
+9. **Biome** must be configured with the `recommended` + `all` ruleset and run on pre-commit (via `husky` + `biome check --staged`).
 10. **Every API endpoint must be documented** with OpenAPI / Swagger annotations or a co-located `.schema.ts` file.
 11. **Database migrations must be reversible** — every `up` migration has a corresponding `down`.
 12. **Feature flags** for risky deployments — wrap new behaviour behind flags, not branches.
