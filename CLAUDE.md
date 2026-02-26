@@ -1295,17 +1295,61 @@ window.addEventListener("error", (event) => {
 
 ## 19. API Response Contract & RFC 7807
 
-### 19.1 Discriminated Union Response Envelope
+### 19.1 Discriminated Union Response Envelope (Wire Format)
 
-Every API endpoint returns a discriminated union so the FE can narrow with a single check:
+`ApiResponse<T>` is the **serialised wire format** for HTTP responses. It complements — not replaces — the in-process `Result<T, E>` type from §4.
+
+| Concern | Type | Layer |
+|---|---|---|
+| In-process error handling | `Result<T, DomainError>` | Domain / Application |
+| HTTP serialisation | `ApiResponse<T>` | Infrastructure (Hono handler) |
+| FE after fetch | Parse `ApiResponse` → `Result<T, ProblemDetail>` | UI adapter |
 
 ```ts
+// Wire format — what goes over HTTP
 type ApiResponse<T> =
   | { readonly status: "success"; readonly data: T }
   | { readonly status: "error"; readonly error: ProblemDetail };
 ```
 
-### 19.2 RFC 7807 Problem Details for Errors
+### 19.2 Bridging Result → ApiResponse in Hono Handlers
+
+The handler unwraps the internal `Result` and maps it to the wire format:
+
+```ts
+app.get("/orders/:id", async (c) => {
+  const result = await getOrderByIdHandler(c.req.param("id"));
+
+  if (isOk(result)) {
+    return c.json({ status: "success" as const, data: result.value });
+  }
+  // Maps DomainError → ProblemDetail
+  return problemResponse(c, result.error);
+});
+```
+
+### 19.3 Parsing ApiResponse → Result on the FE
+
+On the frontend, parse the wire format **back into** a `Result` so the rest of the FE code uses the same in-process pattern:
+
+```ts
+async function fetchApi<T>(
+  url: string,
+  schema: z.ZodType<T>,
+): Promise<Result<T, ProblemDetail>> {
+  const res = await httpClient.get(url);
+  if (isErr(res)) return res;
+
+  const body = ApiResponseSchema(schema).safeParse(res.value);
+  if (!body.success) return err({ type: "ParseError", title: "Invalid response", status: 0, traceId: "" });
+
+  return body.data.status === "success"
+    ? ok(body.data.data)
+    : err(body.data.error);
+}
+```
+
+### 19.4 RFC 7807 Problem Details for Errors
 
 All error responses use `application/problem+json`:
 
@@ -1323,7 +1367,7 @@ interface ProblemDetail {
   }>;
 }
 
-// Hono helper
+// Hono helper — maps DomainError to the wire format
 function problemResponse(c: Context, error: DomainError): Response {
   const status = domainErrorToHttpStatus(error);
   return c.json(
