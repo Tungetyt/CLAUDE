@@ -7,32 +7,43 @@
 
 ## Table of Contents
 
+### Part I — Foundation
 1. [Architecture](#1-architecture)
 2. [TypeScript Type System](#2-typescript-type-system)
-3. [Validation & Trust Boundaries](#3-validation--trust-boundaries)
-4. [Error Handling](#4-error-handling)
-5. [State Management & State Machines](#5-state-management--state-machines)
-6. [Testing Strategy](#6-testing-strategy)
-7. [CSS & Responsive Design](#7-css--responsive-design)
-8. [Accessibility (a11y)](#8-accessibility-a11y)
-9. [Security](#9-security)
-10. [Logging, Monitoring & Alerting](#10-logging-monitoring--alerting)
-11. [Caching](#11-caching)
-12. [Infrastructure Concerns](#12-infrastructure-concerns)
-13. [Idempotency](#13-idempotency)
-14. [Design Patterns & Anti-Patterns](#14-design-patterns--anti-patterns)
-15. [Code Style & Functional Programming](#15-code-style--functional-programming)
-16. [Dependency Management & Façades](#16-dependency-management--façades)
-17. [Frontend Error Reporting](#17-frontend-error-reporting)
-18. [Recommended Libraries](#18-recommended-libraries)
-19. [API Response Contract & RFC 7807](#19-api-response-contract--rfc-7807)
-20. [Cursor-Based Pagination](#20-cursor-based-pagination)
-21. [Data Integrity](#21-data-integrity)
-22. [HTTP Optimisation](#22-http-optimisation)
-23. [Hono-Specific Patterns](#23-hono-specific-patterns)
-24. [Frontend Performance](#24-frontend-performance)
-25. [Explicit Resource Management](#25-explicit-resource-management)
-26. [Checklist Before Every PR](#26-checklist-before-every-pr)
+3. [Error Handling](#3-error-handling)
+4. [Validation & Trust Boundaries](#4-validation--trust-boundaries)
+
+### Part II — Backend
+5. [API Design](#5-api-design)
+6. [Data Layer](#6-data-layer)
+7. [Caching & Performance](#7-caching--performance)
+8. [Infrastructure](#8-infrastructure)
+9. [Hono Patterns](#9-hono-patterns)
+
+### Part III — Frontend
+10. [CSS & Responsive Design](#10-css--responsive-design)
+11. [Accessibility](#11-accessibility)
+12. [State Management](#12-state-management)
+13. [UI Performance](#13-ui-performance)
+14. [Frontend Error Reporting](#14-frontend-error-reporting)
+
+### Part IV — Cross-Cutting Concerns
+15. [Security](#15-security)
+16. [Logging, Monitoring & Alerting](#16-logging-monitoring--alerting)
+17. [Testing Strategy](#17-testing-strategy)
+18. [Code Style & Patterns](#18-code-style--patterns)
+19. [Dependency Management & Façades](#19-dependency-management--façades)
+20. [Explicit Resource Management](#20-explicit-resource-management)
+
+### Part V — Reference
+21. [Recommended Libraries](#21-recommended-libraries)
+22. [Checklist Before Every PR](#22-checklist-before-every-pr)
+23. [Project Configuration](#23-project-configuration)
+24. [Operational Directives](#24-operational-directives)
+
+---
+
+# Part I — Foundation
 
 ---
 
@@ -101,7 +112,7 @@ src/
     payments/
     users/
   shared/
-    lib/           # façades (see §16)
+    lib/           # façades (see §19)
     result/        # Result type
     types/         # shared branded types, utility types
     validation/    # shared Zod schemas
@@ -285,79 +296,9 @@ Never re-implement utility types that `type-fest` already provides.
 
 ---
 
-## 3. Validation & Trust Boundaries
+## 3. Error Handling
 
-### 3.1 Golden Rule: Trust Nothing
-
-Validate **every** trust boundary:
-
-| Boundary | What to validate |
-|---|---|
-| Query parameters | `z.object({ page: z.coerce.number().int().positive().catch(1) })` |
-| Route parameters | Branded type + Zod |
-| Request bodies | Full Zod schema |
-| API responses (own backend) | Zod schema — backends deploy independently |
-| API responses (third-party) | Zod schema — they change without notice |
-| Environment variables | Zod schema at startup, fail fast |
-| localStorage / sessionStorage | Zod schema, `.catch()` for every field |
-| URL hash / fragment | Zod |
-| WebSocket messages | Zod |
-| File uploads | MIME type, size, extension, magic bytes |
-| Database reads | Trust Drizzle types, but validate at ingestion |
-
-### 3.2 Zod `.catch()` for Optional Fields
-
-When an optional field fails validation, **do not crash the entire parse**. Use `.catch()` to degrade gracefully.
-
-```ts
-const UserPreferencesSchema = z.object({
-  // Required — schema WILL fail if missing or invalid
-  userId: z.string().uuid(),
-
-  // Optional with safe fallback — schema WILL NOT fail
-  theme: z.enum(["light", "dark"]).catch("light"),
-  locale: z.string().min(2).max(5).catch("en"),
-  pageSize: z.number().int().positive().max(100).catch(20),
-  notifications: z.boolean().catch(true),
-  lastSeenAt: z.coerce.date().catch(new Date(0)),
-  favoriteCategories: z.array(z.string()).catch([]),
-  experimental: z.record(z.unknown()).catch({}),
-});
-```
-
-### 3.3 Environment Validation (Fail Fast)
-
-```ts
-// src/shared/validation/env.schema.ts
-const EnvSchema = z.object({
-  NODE_ENV: z.enum(["development", "production", "test"]),
-  PORT: z.coerce.number().int().min(1).max(65535).catch(3000),
-  DATABASE_URL: z.string().url(),
-  REDIS_URL: z.string().url(),
-  JWT_SECRET: z.string().min(32),
-  API_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().catch(60000),
-  API_RATE_LIMIT_MAX: z.coerce.number().int().positive().catch(100),
-  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).catch("info"),
-  SENTRY_DSN: z.string().url().optional(),
-});
-
-export type Env = z.infer<typeof EnvSchema>;
-
-export function parseEnv(): Env {
-  const result = EnvSchema.safeParse(process.env);
-  if (!result.success) {
-    console.error("❌ Invalid environment variables:", result.error.flatten());
-    process.exit(1);
-  }
-  return Object.freeze(result.data);
-}
-```
-
----
-
-## 4. Error Handling
-
-### 4.1 Result Type — Errors as First-Class Citizens
+### 3.1 Result Type — Errors as First-Class Citizens
 
 **Never use `try/catch` for expected, recoverable errors.** Reserve `try/catch` exclusively for truly unexpected failures (e.g., out-of-memory). Use a `Result` type instead.
 
@@ -395,7 +336,7 @@ function unwrapOrThrow<T, E>(result: Result<T, E>): T {
 }
 ```
 
-### 4.2 Domain Error Taxonomy
+### 3.2 Domain Error Taxonomy
 
 ```ts
 // src/shared/errors/domainErrors.ts
@@ -443,7 +384,7 @@ type AppError =
   | RateLimitError;
 ```
 
-### 4.3 Error Mapping at the Boundary
+### 3.3 Error Mapping at the Boundary
 
 ```ts
 function domainErrorToHttpStatus(error: DomainError): number {
@@ -460,391 +401,350 @@ function domainErrorToHttpStatus(error: DomainError): number {
 
 ---
 
-## 5. State Management & State Machines
+## 4. Validation & Trust Boundaries
 
-### 5.1 Finite State Machines to Prevent Impossible States
+### 4.1 Golden Rule: Trust Nothing
 
-Use explicit state machines for any entity with a lifecycle. This eliminates invalid boolean combinations such as `{ isLoading: true, isError: true, data: [...] }`.
+Validate **every** trust boundary:
 
-```ts
-// ✅ Discriminated union — impossible states are unrepresentable
-type AsyncState<T, E = Error> =
-  | { readonly status: "idle" }
-  | { readonly status: "loading" }
-  | { readonly status: "success"; readonly data: T }
-  | { readonly status: "error"; readonly error: E };
-
-// ✅ Order lifecycle — only valid transitions are expressible
-type OrderState =
-  | { readonly status: "draft" }
-  | { readonly status: "placed"; readonly placedAt: ISODateString }
-  | { readonly status: "paid"; readonly paidAt: ISODateString; readonly paymentId: string }
-  | { readonly status: "shipped"; readonly shippedAt: ISODateString; readonly trackingNumber: string }
-  | { readonly status: "delivered"; readonly deliveredAt: ISODateString }
-  | { readonly status: "cancelled"; readonly cancelledAt: ISODateString; readonly reason: string };
-```
-
-### 5.2 State Transition Functions
-
-```ts
-type OrderEvent =
-  | { type: "PLACE" }
-  | { type: "PAY"; paymentId: string }
-  | { type: "SHIP"; trackingNumber: string }
-  | { type: "DELIVER" }
-  | { type: "CANCEL"; reason: string };
-
-function transition(state: OrderState, event: OrderEvent): Result<OrderState, DomainError> {
-  const now = new Date().toISOString() as ISODateString;
-  switch (state.status) {
-    case "draft":
-      if (event.type === "PLACE") return ok({ status: "placed", placedAt: now });
-      if (event.type === "CANCEL") return ok({ status: "cancelled", cancelledAt: now, reason: event.reason });
-      return err(new ValidationError(`Cannot ${event.type} a draft order`));
-    case "placed":
-      if (event.type === "PAY") return ok({ status: "paid", paidAt: now, paymentId: event.paymentId });
-      if (event.type === "CANCEL") return ok({ status: "cancelled", cancelledAt: now, reason: event.reason });
-      return err(new ValidationError(`Cannot ${event.type} a placed order`));
-    // ... exhaustive handling
-    default:
-      return assertNever(state);
-  }
-}
-```
-
-For complex UI state machines, consider using **XState** (via a façade — see §16).
-
----
-
-## 6. Testing Strategy
-
-### 6.1 Test Pyramid — Aim for 100% Code Coverage
-
-| Layer | Tool | Proportion | What It Covers |
-|---|---|---|---|
-| **Unit** | `bun:test` | ~70% | Pure functions, domain logic, value objects, utilities, state transitions |
-| **Integration** | `bun:test` + MSW + Testcontainers | ~20% | Use-case handlers with real adapters, DB queries, cross-module interactions |
-| **E2E** | Playwright | ~10% | Critical user journeys, happy + error paths through the full stack |
-
-### 6.2 Test-Driven Development (TDD) Cycle
-
-1. **Red** — Write a failing test that describes the desired behavior.
-2. **Green** — Write the minimal code to make the test pass.
-3. **Refactor** — Improve the code while keeping tests green.
-
-Every feature branch must include tests **before** or **alongside** implementation code.
-
-### 6.3 Unit Tests
-
-```ts
-// ✅ Test the Result path explicitly — errors are first-class
-describe("toEmail", () => {
-  it("accepts valid email", () => {
-    const result = toEmail("user@example.com");
-    expect(isOk(result)).toBe(true);
-  });
-
-  it("rejects missing @", () => {
-    const result = toEmail("invalid");
-    expect(isErr(result)).toBe(true);
-  });
-
-  it("rejects empty string", () => {
-    const result = toEmail("");
-    expect(isErr(result)).toBe(true);
-  });
-});
-```
-
-### 6.4 Integration Tests — Use MSW, Not Manual Mocks
-
-**Never** use `jest.mock()` or `mock.module()` to mock HTTP calls. Use **MSW** (Mock Service Worker) to intercept at the network level.
-
-```ts
-import { setupServer } from "msw/node";
-import { http, HttpResponse } from "msw";
-
-const server = setupServer(
-  http.get("https://api.example.com/users/:id", ({ params }) =>
-    HttpResponse.json({ id: params.id, name: "Alice" })
-  )
-);
-
-beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
-afterEach(() => server.resetHandlers());
-afterAll(() => server.close());
-
-it("fetches user through the façade", async () => {
-  const result = await userService.getById("123");
-  expect(isOk(result)).toBe(true);
-  if (isOk(result)) expect(result.value.name).toBe("Alice");
-});
-```
-
-### 6.5 E2E Tests (Playwright)
-
-```ts
-test("user can complete checkout", async ({ page }) => {
-  await page.goto("/products");
-  await page.getByRole("button", { name: /add to cart/i }).first().click();
-  await page.getByRole("link", { name: /cart/i }).click();
-  await page.getByRole("button", { name: /checkout/i }).click();
-  await expect(page.getByText(/order confirmed/i)).toBeVisible();
-});
-```
-
-### 6.6 Snapshot Tests for Frequently Changing Output
-
-Use snapshots **only** for outputs that change often and are tedious to assert field-by-field (e.g., serialised API responses, rendered component trees). Keep snapshots small and focused. Update with `--update` flag when intentional changes occur.
-
-```ts
-it("serialises order DTO", () => {
-  const dto = toOrderDTO(testOrder);
-  expect(dto).toMatchSnapshot();
-});
-```
-
-### 6.7 Testing Error Paths
-
-Every test suite must cover:
-- **Happy path**
-- **Validation failures** (bad input)
-- **Not-found / empty-state**
-- **Authorization denied**
-- **Network failures** (MSW returning 500 or timeout)
-- **Concurrent / race conditions** where applicable
-
----
-
-## 7. CSS & Responsive Design
-
-### 7.1 Mobile-First
-
-All CSS starts from the smallest viewport and adds complexity upward.
-
-```css
-/* Base: mobile */
-.card {
-  padding: var(--space-3);
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-2);
-}
-
-/* Tablet */
-@media (min-width: 48rem) {
-  .card {
-    flex-direction: row;
-    padding: var(--space-4);
-  }
-}
-
-/* Desktop */
-@media (min-width: 80rem) {
-  .card {
-    max-width: 60rem;
-    margin-inline: auto;
-  }
-}
-```
-
-### 7.2 Design Tokens as CSS Custom Properties
-
-```css
-:root {
-  /* Spacing scale */
-  --space-1: 0.25rem;
-  --space-2: 0.5rem;
-  --space-3: 1rem;
-  --space-4: 1.5rem;
-  --space-5: 2rem;
-
-  /* Typography */
-  --font-sans: "Inter", system-ui, sans-serif;
-  --font-mono: "Fira Code", monospace;
-
-  /* Colors — semantic tokens */
-  --color-surface: hsl(0 0% 100%);
-  --color-on-surface: hsl(220 15% 15%);
-  --color-primary: hsl(220 90% 56%);
-  --color-error: hsl(0 72% 51%);
-
-  /* Radii */
-  --radius-sm: 0.25rem;
-  --radius-md: 0.5rem;
-}
-```
-
-### 7.3 Rules
-
-- Prefer `rem` / `em` over `px`.
-- Use logical properties (`margin-inline`, `padding-block`).
-- Prefer `gap` over margins for flex/grid spacing.
-- Use `clamp()` for fluid typography: `font-size: clamp(1rem, 0.5rem + 1vw, 1.25rem)`.
-- No `!important` unless overriding third-party styles.
-- Use container queries (`@container`) for component-level responsiveness when supported.
-
----
-
-## 8. Accessibility (a11y)
-
-### 8.1 Non-Negotiable Rules
-
-- **Semantic HTML first** — use `<button>`, `<nav>`, `<main>`, `<article>`, `<dialog>`, etc.
-- **All interactive elements are keyboard-accessible** — visible `:focus-visible` ring.
-- **All images have `alt` text** — decorative images get `alt=""` and `aria-hidden="true"`.
-- **Form inputs have associated `<label>` elements** — never rely on placeholder alone.
-- **Colour contrast ≥ 4.5:1** for normal text (WCAG AA).
-- **No information conveyed by colour alone** — always add an icon or text label.
-- **ARIA only when HTML semantics are insufficient** — prefer native elements.
-- **Live regions** (`aria-live="polite"`, `role="alert"`) for dynamic content.
-- **Skip-to-content link** as the first focusable element.
-- **`prefers-reduced-motion` media query** — disable animations for users who request it:
-  ```css
-  @media (prefers-reduced-motion: reduce) {
-    *, *::before, *::after {
-      animation-duration: 0.01ms !important;
-      transition-duration: 0.01ms !important;
-    }
-  }
-  ```
-
-### 8.2 Automated Enforcement
-
-- Run `axe-core` checks in every Playwright E2E test.
-- Enable the `useSemanticElements`, `useValidAriaRole`, `useValidAriaValues`, and other a11y rules in **Biome**'s linter. Supplement with `@axe-core/playwright` in E2E.
-- Include a11y checks in CI: `pa11y-ci` or Lighthouse CI.
-
----
-
-## 9. Security
-
-### 9.1 Input & Output
-
-- **Validate all inputs** at trust boundaries (§3).
-- **Sanitise HTML output** — use a library like `DOMPurify` behind a façade.
-- **Parameterised queries only** — never concatenate user input into SQL. Drizzle handles this by default.
-- **Escape user-generated content** rendered in templates.
-
-### 9.2 Authentication & Authorization
-
-- **Short-lived JWTs** (15 min access token) + **long-lived refresh tokens** (HTTP-only, Secure, SameSite=Strict cookies).
-- **Rotate refresh tokens** on every use (rotation invalidates stolen tokens).
-- **bcrypt/argon2** for password hashing — never SHA/MD5.
-- **RBAC or ABAC** enforced at the **application layer**, not just the route level.
-- **Middleware guards** on every route — no "open by default".
-
-### 9.3 HTTP Security Headers
-
-Set via middleware or reverse proxy:
-
-```
-Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
-X-Content-Type-Options: nosniff
-X-Frame-Options: DENY
-Referrer-Policy: strict-origin-when-cross-origin
-Permissions-Policy: camera=(), microphone=(), geolocation=()
-```
-
-### 9.4 Dependency Security
-
-- `bun audit` (or `bun pm pack --dry-run` + `socket.dev`) in CI — fail on **high** or **critical** vulnerabilities.
-- Pin exact versions in `bun.lock`.
-- Use `socket.dev` or `snyk` for supply-chain monitoring.
-
-### 9.5 Secrets
-
-- **Never** commit secrets. Use `.env` files (`.gitignore`'d) and inject via CI/CD.
-- Validate all env vars at startup with Zod (§3.3).
-- Rotate secrets regularly; support graceful key rotation (accept old + new simultaneously during rollout).
-
-### 9.6 CSRF Protection
-
-- Use **SameSite=Strict** cookies + CSRF tokens for state-changing requests.
-- For APIs consumed by SPAs, use the **double-submit cookie** pattern or **Origin header validation**.
-
----
-
-## 10. Logging, Monitoring & Alerting
-
-### 10.1 Wide (Structured) Logs
-
-A "wide log" is a single structured event with **all relevant context** attached rather than multiple narrow log lines.
-
-```ts
-// src/shared/logging/logger.ts
-interface WideLogEvent {
-  readonly timestamp: string;
-  readonly level: "debug" | "info" | "warn" | "error";
-  readonly message: string;
-  readonly service: string;
-  readonly traceId: string;
-  readonly spanId?: string;
-  readonly userId?: string;
-  readonly requestId?: string;
-  readonly durationMs?: number;
-  readonly statusCode?: number;
-  readonly method?: string;
-  readonly path?: string;
-  readonly query?: Record<string, unknown>;
-  readonly error?: {
-    name: string;
-    message: string;
-    stack?: string;
-    code?: string;
-  };
-  readonly metadata?: Record<string, unknown>;
-}
-
-// Usage — one event per request, rich with context
-logger.info({
-  message: "Order created",
-  traceId,
-  userId: session.userId,
-  orderId: order.id,
-  itemCount: order.items.length,
-  totalCents: order.totalCents,
-  durationMs: Date.now() - startTime,
-  paymentProvider: "stripe",
-  idempotencyKey,
-});
-```
-
-### 10.2 Log Levels
-
-| Level | Use |
+| Boundary | What to validate |
 |---|---|
-| `debug` | Detailed diagnostic info (disabled in production) |
-| `info` | Normal operational events: request handled, job completed |
-| `warn` | Recoverable issues: retry succeeded, cache miss, deprecated usage |
-| `error` | Failures requiring attention: unhandled rejection, integration failure |
+| Query parameters | `z.object({ page: z.coerce.number().int().positive().catch(1) })` |
+| Route parameters | Branded type + Zod |
+| Request bodies | Full Zod schema |
+| API responses (own backend) | Zod schema — backends deploy independently |
+| API responses (third-party) | Zod schema — they change without notice |
+| Environment variables | Zod schema at startup, fail fast |
+| localStorage / sessionStorage | Zod schema, `.catch()` for every field |
+| URL hash / fragment | Zod |
+| WebSocket messages | Zod |
+| File uploads | MIME type, size, extension, magic bytes |
+| Database reads | Trust Drizzle types, but validate at ingestion |
 
-### 10.3 Alerting Rules (Examples)
+### 4.2 Zod `.catch()` for Optional Fields
 
-Configure in your monitoring platform (Datadog, Grafana, CloudWatch):
+When an optional field fails validation, **do not crash the entire parse**. Use `.catch()` to degrade gracefully.
 
-| Alert | Condition | Severity |
-|---|---|---|
-| Error rate spike | `count(level=error) / count(*) > 5%` over 5 min | P1 |
-| Latency degradation | `p99(durationMs) > 2000` for 10 min | P2 |
-| Auth failures | `count(statusCode=401) > 50` in 5 min | P1 |
-| Rate limiting triggered | `count(statusCode=429) > 100` in 5 min | P2 |
-| Unhandled rejection | Any `unhandledRejection` or `uncaughtException` | P1 |
-| FE error spike | FE error report count > threshold | P2 |
-| DB connection pool exhaustion | Available connections < 2 for 1 min | P1 |
+```ts
+const UserPreferencesSchema = z.object({
+  // Required — schema WILL fail if missing or invalid
+  userId: z.string().uuid(),
 
-### 10.4 Correlation
+  // Optional with safe fallback — schema WILL NOT fail
+  theme: z.enum(["light", "dark"]).catch("light"),
+  locale: z.string().min(2).max(5).catch("en"),
+  pageSize: z.number().int().positive().max(100).catch(20),
+  notifications: z.boolean().catch(true),
+  lastSeenAt: z.coerce.date().catch(new Date(0)),
+  favoriteCategories: z.array(z.string()).catch([]),
+  experimental: z.record(z.unknown()).catch({}),
+});
+```
 
-- Generate a `traceId` (UUID v4) at the entry point of every request.
-- Propagate it via `AsyncLocalStorage` (Bun supports the Node.js `async_hooks` API) so every log within that request lifecycle includes it automatically.
-- FE includes a `requestId` header that maps to the BE `traceId`.
+### 4.3 Environment Validation (Fail Fast)
+
+```ts
+// src/shared/validation/env.schema.ts
+const EnvSchema = z.object({
+  NODE_ENV: z.enum(["development", "production", "test"]),
+  PORT: z.coerce.number().int().min(1).max(65535).catch(3000),
+  DATABASE_URL: z.string().url(),
+  REDIS_URL: z.string().url(),
+  JWT_SECRET: z.string().min(32),
+  API_RATE_LIMIT_WINDOW_MS: z.coerce.number().int().positive().catch(60000),
+  API_RATE_LIMIT_MAX: z.coerce.number().int().positive().catch(100),
+  LOG_LEVEL: z.enum(["debug", "info", "warn", "error"]).catch("info"),
+  SENTRY_DSN: z.string().url().optional(),
+});
+
+export type Env = z.infer<typeof EnvSchema>;
+
+export function parseEnv(): Env {
+  const result = EnvSchema.safeParse(process.env);
+  if (!result.success) {
+    console.error("❌ Invalid environment variables:", result.error.flatten());
+    process.exit(1);
+  }
+  return Object.freeze(result.data);
+}
+```
 
 ---
 
-## 11. Caching
+# Part II — Backend
 
-### 11.1 In-Memory Cache in Front of GET Calls / DB Queries
+---
+
+## 5. API Design
+
+### 5.1 Discriminated Union Response Envelope (Wire Format)
+
+`ApiResponse<T>` is the **serialised wire format** for HTTP responses. It complements — not replaces — the in-process `Result<T, E>` type from §4.
+
+| Concern | Type | Layer |
+|---|---|---|
+| In-process error handling | `Result<T, DomainError>` | Domain / Application |
+| HTTP serialisation | `ApiResponse<T>` | Infrastructure (Hono handler) |
+| FE after fetch | Parse `ApiResponse` → `Result<T, ProblemDetail>` | UI adapter |
+
+```ts
+// Wire format — what goes over HTTP
+type ApiResponse<T> =
+  | { readonly status: "success"; readonly data: T }
+  | { readonly status: "error"; readonly error: ProblemDetail };
+```
+
+### 5.2 Bridging Result → ApiResponse in Hono Handlers
+
+The handler unwraps the internal `Result` and maps it to the wire format:
+
+```ts
+app.get("/orders/:id", async (c) => {
+  const result = await getOrderByIdHandler(c.req.param("id"));
+
+  if (isOk(result)) {
+    return c.json({ status: "success" as const, data: result.value });
+  }
+  // Maps DomainError → ProblemDetail
+  return problemResponse(c, result.error);
+});
+```
+
+### 5.3 Parsing ApiResponse → Result on the FE
+
+On the frontend, parse the wire format **back into** a `Result` so the rest of the FE code uses the same in-process pattern:
+
+```ts
+async function fetchApi<T>(
+  url: string,
+  schema: z.ZodType<T>,
+): Promise<Result<T, ProblemDetail>> {
+  const res = await httpClient.get(url);
+  if (isErr(res)) return res;
+
+  const body = ApiResponseSchema(schema).safeParse(res.value);
+  if (!body.success) return err({ type: "ParseError", title: "Invalid response", status: 0, traceId: "" });
+
+  return body.data.status === "success"
+    ? ok(body.data.data)
+    : err(body.data.error);
+}
+```
+
+### 5.4 RFC 7807 Problem Details for Errors
+
+All error responses use `application/problem+json`:
+
+```ts
+interface ProblemDetail {
+  readonly type: string;        // URI reference identifying the error type
+  readonly title: string;       // Short human-readable summary
+  readonly status: number;      // HTTP status code
+  readonly detail?: string;     // Explanation specific to this occurrence
+  readonly instance?: string;   // URI identifying this specific occurrence
+  readonly traceId: string;     // Correlation ID for debugging
+  readonly errors?: ReadonlyArray<{
+    readonly field: string;
+    readonly message: string;
+  }>;
+}
+
+// Hono helper — maps DomainError to the wire format
+function problemResponse(c: Context, error: DomainError): Response {
+  const status = domainErrorToHttpStatus(error);
+  return c.json(
+    {
+      status: "error" as const,
+      error: {
+        type: `https://api.example.com/errors/${error._tag}`,
+        title: error._tag,
+        status,
+        detail: error.message,
+        traceId: getTraceId(),
+      },
+    },
+    status,
+  );
+}
+```
+
+### 5.5 Cursor-Based Pagination
+
+Prefer **cursor/keyset** pagination over offset-based. Offset pagination degrades on large tables and produces inconsistent results under concurrent writes.
+
+```ts
+// Shared types
+interface CursorPage<T> {
+  readonly items: ReadonlyArray<T>;
+  readonly nextCursor: string | null;
+  readonly hasMore: boolean;
+}
+
+const PaginationParamsSchema = z.object({
+  cursor: z.string().optional(),
+  limit: z.coerce.number().int().min(1).max(100).catch(20),
+});
+type PaginationParams = z.infer<typeof PaginationParamsSchema>;
+
+// Drizzle query example
+async function listOrders(
+  params: PaginationParams,
+): Promise<CursorPage<Order>> {
+  const rows = await db
+    .select()
+    .from(orders)
+    .where(params.cursor ? gt(orders.id, params.cursor) : undefined)
+    .orderBy(asc(orders.id))
+    .limit(params.limit + 1); // fetch one extra to detect hasMore
+
+  const hasMore = rows.length > params.limit;
+  const items = hasMore ? rows.slice(0, -1) : rows;
+
+  return {
+    items,
+    nextCursor: items.at(-1)?.id ?? null,
+    hasMore,
+  };
+}
+```
+
+### 5.6 Idempotency-Key Header for Mutating Operations
+
+All `POST`, `PUT`, `PATCH` endpoints that create resources or trigger side effects (especially payments) **must** support an `Idempotency-Key` header.
+
+```ts
+// Hono middleware
+async function idempotencyMiddleware(c: Context, next: Next) {
+  const idempotencyKey = c.req.header("idempotency-key");
+  if (!idempotencyKey) return next();
+
+  const cachedResponse = await idempotencyStore.get(idempotencyKey);
+  if (cachedResponse) {
+    return c.json(cachedResponse.body, cachedResponse.statusCode);
+  }
+
+  await next();
+
+  // Capture response after handler runs
+  const body = await c.res.clone().json();
+  idempotencyStore.set(idempotencyKey, {
+    statusCode: c.res.status,
+    body,
+  }, 24 * 60 * 60 * 1000); // 24h TTL
+}
+```
+
+### 5.7 Rules
+
+- Client generates a UUID v4 as the idempotency key.
+- Store must be **shared** across instances (Redis).
+- **Lock** the key before processing to prevent concurrent execution of the same key.
+- Return the stored response for duplicate requests without re-processing.
+
+---
+
+## 6. Data Layer
+
+### 6.1 Optimistic Locking
+
+Use a `version` column on every mutable entity. Increment on every write. Return `409 Conflict` when the version in the `WHERE` clause matches zero rows.
+
+```ts
+// Drizzle example
+async function updateOrder(
+  id: OrderId,
+  data: UpdateOrderInput,
+  expectedVersion: number,
+): Promise<Result<Order, ConflictError | NotFoundError>> {
+  const result = await db
+    .update(orders)
+    .set({ ...data, version: expectedVersion + 1 })
+    .where(and(eq(orders.id, id), eq(orders.version, expectedVersion)))
+    .returning();
+
+  if (result.length === 0) {
+    const exists = await db.select({ id: orders.id }).from(orders).where(eq(orders.id, id));
+    return exists.length === 0
+      ? err(new NotFoundError("Order", id))
+      : err(new ConflictError("Order was modified by another request. Refresh and retry."));
+  }
+
+  return ok(result[0]!);
+}
+```
+
+### 6.2 Soft Deletes
+
+**Never hard-delete user data.** Use a `deletedAt` column.
+
+```ts
+// Schema
+const users = pgTable("users", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  email: text("email").notNull(),
+  deletedAt: timestamp("deleted_at"),
+  // ...
+});
+
+// All queries exclude soft-deleted rows by default
+const activeUsers = () =>
+  db.select().from(users).where(isNull(users.deletedAt));
+
+// "Delete" = set the timestamp
+const softDelete = (id: UserId) =>
+  db.update(users).set({ deletedAt: new Date() }).where(eq(users.id, id));
+```
+
+### 6.3 Audit Trail
+
+Log every mutation to an append-only audit table:
+
+```ts
+const auditLog = pgTable("audit_log", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  entityType: text("entity_type").notNull(),  // e.g. "Order"
+  entityId: text("entity_id").notNull(),
+  action: text("action").notNull(),            // "create" | "update" | "delete"
+  actorId: text("actor_id").notNull(),
+  before: jsonb("before"),                     // snapshot before mutation
+  after: jsonb("after"),                       // snapshot after mutation
+  timestamp: timestamp("timestamp").defaultNow().notNull(),
+  traceId: text("trace_id"),
+});
+```
+
+Write the audit row **in the same transaction** as the mutation.
+
+### 6.4 Outbox Pattern for Reliable Events
+
+When a domain event must trigger side effects (email, webhook, analytics), write the event to an `outbox` table **in the same DB transaction** as the mutation. A background poller or CDC (Change Data Capture) picks it up and publishes.
+
+```ts
+const outbox = pgTable("outbox", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  eventType: text("event_type").notNull(),
+  payload: jsonb("payload").notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  processedAt: timestamp("processed_at"),
+});
+
+// Inside a transaction:
+await db.transaction(async (tx) => {
+  await tx.insert(orders).values(newOrder);
+  await tx.insert(outbox).values({
+    eventType: "order.created",
+    payload: newOrder,
+  });
+});
+```
+
+This guarantees that either **both** the order and the event are persisted, or **neither** is — preventing lost or phantom events.
+
+---
+
+## 7. Caching & Performance
+
+### 7.1 In-Memory Cache in Front of GET Calls / DB Queries
 
 ```ts
 // src/shared/cache/inMemoryCache.ts
@@ -896,7 +796,7 @@ class InMemoryCache {
 }
 ```
 
-### 11.2 Cache-Aside Pattern for Query Handlers
+### 7.2 Cache-Aside Pattern for Query Handlers
 
 ```ts
 async function getOrderByIdHandler(
@@ -916,622 +816,13 @@ async function getOrderByIdHandler(
 }
 ```
 
-### 11.3 Cache Invalidation
+### 7.3 Cache Invalidation
 
 - Invalidate on any **command** (write) that affects the cached resource.
 - Use `invalidatePattern` for related cache entries.
 - In distributed environments, use Redis pub/sub or similar for cross-instance invalidation.
 
----
-
-## 12. Infrastructure Concerns
-
-### 12.1 Rate Limiting
-
-Apply at the infrastructure layer (reverse proxy / API gateway) **and** at the application layer as defense-in-depth.
-
-```ts
-// Application-level rate limiting (e.g. hono-rate-limiter or rate-limiter-flexible behind a façade)
-import type { RateLimiterConfig } from "./rateLimiter.port";
-
-const apiRateLimiter: RateLimiterConfig = {
-  windowMs: 60_000,
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: (req) => req.ip ?? "unknown",
-  handler: (_req, res) =>
-    res.status(429).json({
-      error: "Too many requests",
-      retryAfterMs: 60_000,
-    }),
-};
-```
-
-### 12.2 Load Balancing
-
-- Use a reverse proxy (NGINX, Caddy, or cloud ALB) in front of multiple Bun instances.
-- Ensure the app is **stateless** — all state lives in the DB / Redis / external store.
-- Health check endpoint: `GET /health` returns `200` with `{ status: "ok", uptime, version }`.
-
-### 12.3 Graceful Shutdown
-
-```ts
-async function gracefulShutdown(server: HttpServer, db: DatabaseClient): Promise<void> {
-  logger.info({ message: "Shutting down gracefully..." });
-  server.close();           // stop accepting new connections
-  await db.disconnect();    // drain DB pool
-  await cache.clear();      // optional
-  process.exit(0);
-}
-
-process.on("SIGTERM", () => gracefulShutdown(server, db));
-process.on("SIGINT", () => gracefulShutdown(server, db));
-```
-
----
-
-## 13. Idempotency
-
-### 13.1 Idempotency-Key Header for Mutating Operations
-
-All `POST`, `PUT`, `PATCH` endpoints that create resources or trigger side effects (especially payments) **must** support an `Idempotency-Key` header.
-
-```ts
-// Middleware
-// Hono middleware
-async function idempotencyMiddleware(c: Context, next: Next) {
-  const idempotencyKey = c.req.header("idempotency-key");
-  if (!idempotencyKey) return next();
-
-  const cachedResponse = await idempotencyStore.get(idempotencyKey);
-  if (cachedResponse) {
-    return c.json(cachedResponse.body, cachedResponse.statusCode);
-  }
-
-  await next();
-
-  // Capture response after handler runs
-  const body = await c.res.clone().json();
-  idempotencyStore.set(idempotencyKey, {
-    statusCode: c.res.status,
-    body,
-  }, 24 * 60 * 60 * 1000); // 24h TTL
-}
-```
-
-### 13.2 Rules
-
-- Client generates a UUID v4 as the idempotency key.
-- Store must be **shared** across instances (Redis).
-- **Lock** the key before processing to prevent concurrent execution of the same key.
-- Return the stored response for duplicate requests without re-processing.
-
----
-
-## 14. Design Patterns & Anti-Patterns
-
-### 14.1 Patterns to Use
-
-| Pattern | When |
-|---|---|
-| **Façade** | Wrap every external library (§16) |
-| **Repository** | Abstract data access behind a port interface |
-| **Factory** | Complex object construction, especially for domain entities |
-| **Strategy** | Swappable algorithms (payment providers, notification channels) |
-| **Observer / Event Emitter** | Domain events (order placed → send email, update inventory) |
-| **Builder** | Complex query construction, test fixtures |
-| **Decorator** | Cross-cutting concerns (logging, caching, auth) |
-| **State Machine** | Entity lifecycle (§5) |
-
-### 14.2 Anti-Patterns to Avoid
-
-| Anti-Pattern | Correct Alternative |
-|---|---|
-| God class / God module | Split by single responsibility |
-| Barrel files (`index.ts` re-exporting everything) | Import directly from the source module |
-| `any` type | `unknown` + type narrowing |
-| Nested `try/catch` | `Result` type composition |
-| Boolean flags for state | Discriminated unions / state machines |
-| Mutable global state | Dependency injection, `AsyncLocalStorage` |
-| Magic strings / numbers | Constants, enums, branded types |
-| Prop drilling > 2 levels | Context / composition / dependency injection |
-| `useEffect` for data fetching | React Query / SWR (behind a façade) |
-| Over-mocking in tests | MSW for network; real instances for domain logic |
-| Premature optimisation | Measure first, optimise second |
-| Circular dependencies | Restructure modules, use dependency inversion |
-
----
-
-## 15. Code Style & Functional Programming
-
-### 15.1 Prefer FP, Use OOP When It Makes Sense
-
-- **Default to pure functions** with explicit inputs and outputs.
-- Use **OOP** for entities with identity and lifecycle (domain entities, state machines, cache instances).
-- Avoid classes for stateless logic — a plain function is simpler.
-
-### 15.2 Specific Rules
-
-```ts
-// ❌ Useless temporary variable
-const items = getItems();
-return items;
-
-// ✅ Direct return
-return getItems();
-
-// ❌ Imperative transformation
-const names: string[] = [];
-for (const user of users) {
-  names.push(user.name);
-}
-
-// ✅ Declarative
-const names = users.map((user) => user.name);
-
-// ❌ Mutation
-user.name = "Alice";
-
-// ✅ Copy
-const updatedUser = { ...user, name: "Alice" };
-
-// ❌ Null checks scattered everywhere
-if (user !== null && user !== undefined) { ... }
-
-// ✅ Optional chaining + nullish coalescing
-const name = user?.name ?? "Anonymous";
-
-// ✅ Pipeline style (when readability improves)
-const activeAdminEmails = users
-  .filter((u) => u.isActive)
-  .filter((u) => u.role === "admin")
-  .map((u) => u.email);
-```
-
-### 15.3 Immutability
-
-- Mark all function parameters as `readonly` when possible.
-- Use `ReadonlyDeep` from `type-fest` for domain types.
-- Use `Object.freeze()` for runtime immutability of configuration objects.
-- Prefer `ReadonlyArray<T>` over `T[]` in type signatures.
-- Prefer `ReadonlyMap` and `ReadonlySet` over mutable counterparts.
-
----
-
-## 16. Dependency Management & Façades
-
-### 16.1 Façade Every External Library
-
-Every external dependency — including "staples" like React, Zod, Drizzle, ky — is accessed through a **thin façade**. This provides:
-
-1. **Replaceability** — swap the underlying library without touching feature code.
-2. **Testability** — mock the façade interface in tests.
-3. **Consistent API** — normalise quirks and enforce project conventions.
-
-```
-src/shared/lib/
-  http/
-    httpClient.port.ts        # interface
-    kyHttpClient.ts           # adapter (default)
-    fetchHttpClient.ts        # alternative adapter
-    httpClient.facade.ts      # factory that returns the active adapter
-  validation/
-    validator.port.ts
-    zodValidator.ts
-  orm/
-    orm.port.ts
-    drizzleOrm.ts
-  ui/
-    uiFramework.port.ts       # abstracts React-specific APIs
-    reactUiFramework.ts
-  state/
-    stateMachine.port.ts
-    xstateStateMachine.ts
-  cache/
-    cache.port.ts
-    redisCache.ts
-    inMemoryCache.ts
-```
-
-### 16.2 Example: HTTP Client Façade
-
-```ts
-// src/shared/lib/http/httpClient.port.ts
-interface HttpClient {
-  get<T>(url: string, options?: RequestOptions): Promise<Result<T, HttpError>>;
-  post<T>(url: string, body: unknown, options?: RequestOptions): Promise<Result<T, HttpError>>;
-  put<T>(url: string, body: unknown, options?: RequestOptions): Promise<Result<T, HttpError>>;
-  delete<T>(url: string, options?: RequestOptions): Promise<Result<T, HttpError>>;
-}
-
-interface RequestOptions {
-  readonly headers?: Readonly<Record<string, string>>;
-  readonly params?: Readonly<Record<string, string>>;
-  readonly timeoutMs?: number;
-  readonly signal?: AbortSignal;
-}
-
-// src/shared/lib/http/kyHttpClient.ts — implements HttpClient using ky
-// Feature code only imports HttpClient, never ky directly
-```
-
----
-
-## 17. Frontend Error Reporting
-
-### 17.1 Send Critical FE Errors to a Dedicated Backend Endpoint
-
-```ts
-// src/ui/services/errorReporter.ts
-interface FrontendError {
-  readonly message: string;
-  readonly stack?: string;
-  readonly componentStack?: string;
-  readonly url: string;
-  readonly userAgent: string;
-  readonly timestamp: string;
-  readonly userId?: string;
-  readonly sessionId: string;
-  readonly metadata?: Record<string, unknown>;
-  readonly severity: "warning" | "error" | "fatal";
-}
-
-async function reportError(error: FrontendError): Promise<void> {
-  // Fire-and-forget with navigator.sendBeacon for reliability during page unload
-  const payload = JSON.stringify(error);
-
-  if (navigator.sendBeacon) {
-    navigator.sendBeacon("/api/v1/client-errors", payload);
-  } else {
-    // Fallback with fetch, no await — we don't want to block the UI
-    fetch("/api/v1/client-errors", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: payload,
-      keepalive: true,
-    }).catch(() => {
-      // Swallow — if error reporting itself fails, do not recurse
-    });
-  }
-}
-```
-
-### 17.2 Global Error Boundary (React)
-
-```tsx
-// Wrap the entire app; log to the endpoint above
-class GlobalErrorBoundary extends React.Component<Props, State> {
-  static getDerivedStateFromError(error: Error): State {
-    return { hasError: true, error };
-  }
-
-  componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
-    reportError({
-      message: error.message,
-      stack: error.stack,
-      componentStack: errorInfo.componentStack ?? undefined,
-      url: window.location.href,
-      userAgent: navigator.userAgent,
-      timestamp: new Date().toISOString(),
-      sessionId: getSessionId(),
-      severity: "fatal",
-    });
-  }
-
-  render(): React.ReactNode {
-    if (this.state.hasError) {
-      return <FallbackErrorPage />;
-    }
-    return this.props.children;
-  }
-}
-```
-
-### 17.3 Also Catch Unhandled Promise Rejections & Global Errors
-
-```ts
-window.addEventListener("unhandledrejection", (event) => {
-  reportError({
-    message: `Unhandled rejection: ${event.reason}`,
-    stack: event.reason?.stack,
-    url: window.location.href,
-    userAgent: navigator.userAgent,
-    timestamp: new Date().toISOString(),
-    sessionId: getSessionId(),
-    severity: "error",
-  });
-});
-
-window.addEventListener("error", (event) => {
-  reportError({
-    message: event.message,
-    stack: event.error?.stack,
-    url: window.location.href,
-    userAgent: navigator.userAgent,
-    timestamp: new Date().toISOString(),
-    sessionId: getSessionId(),
-    severity: "error",
-  });
-});
-```
-
----
-
-## 18. Recommended Libraries
-
-| Category | Library | Rationale |
-|---|---|---|
-| **Utility Types** | `type-fest` | Rich type utilities; do not re-invent |
-| **Validation** | `zod` (via façade) | Runtime + static type inference |
-| **HTTP** | `ky` (via façade) | Retry, timeout, hooks, tiny bundle |
-| **API mocking** | `msw` | Network-level interception for tests |
-| **Runtime & Package Manager** | `bun` | Fast runtime, built-in test runner, drop-in Node.js replacement |
-| **Testing** | `bun:test` | Built-in, Jest-compatible API, fast |
-| **E2E** | `playwright` | Cross-browser, reliable |
-| **Coverage** | `v8` (via `bun:test --coverage`) | Native V8 coverage, fast |
-| **State machines** | `xstate` (via façade) | Formal statecharts |
-| **Data structures** | `mnemonist` or `immutable`| Battle-tested advanced data structures |
-| **Date/time** | `temporal` polyfill or `date-fns` (via façade) | Immutable, tree-shakeable |
-| **ORM** | `drizzle-orm` + `drizzle-kit` (via façade) | Type-safe, SQL-like API, lightweight, schema-as-code |
-| **Logging** | `pino` (via façade) | Fast, structured JSON logging |
-| **Rate limiting** | `rate-limiter-flexible` | In-memory + Redis support |
-| **Sanitisation** | `DOMPurify` (via façade) | XSS prevention |
-| **a11y lint** | Biome built-in a11y rules | Catches a11y issues at lint time (no extra plugin) |
-| **a11y test** | `@axe-core/playwright` | Runtime a11y checks in E2E |
-| **CSS lint** | `stylelint` | Enforce CSS conventions |
-| **Linting + Formatting** | `biome` | Lint + format in one tool; extremely fast, no config sprawl |
-| **Git hooks** | `husky` + Biome `--staged` flag | Pre-commit quality gates |
-| **Server framework** | `hono` | Lightweight, edge-ready, type-safe routes + `hc` RPC client |
-| **Hono validation** | `@hono/zod-validator` | Request validation middleware with Zod type inference |
-| **Virtualisation** | `@tanstack/react-virtual` (via façade) | Windowed rendering for large lists, tables, grids |
-| **Web Vitals** | `web-vitals` | Measure CLS, LCP, INP; report to monitoring |
-| **Env parsing** | `zod` (built-in, §3.3) | Fail-fast env validation |
-| **ID generation** | `nanoid` or `uuid` | Collision-resistant IDs |
-
-> **Rule:** Before writing any non-trivial data structure or algorithm from scratch, search for a well-maintained library (`bun add`). Prefer installing `mnemonist` over hand-rolling an AVL tree, LRU cache, or trie.
-
----
-
-## 19. API Response Contract & RFC 7807
-
-### 19.1 Discriminated Union Response Envelope (Wire Format)
-
-`ApiResponse<T>` is the **serialised wire format** for HTTP responses. It complements — not replaces — the in-process `Result<T, E>` type from §4.
-
-| Concern | Type | Layer |
-|---|---|---|
-| In-process error handling | `Result<T, DomainError>` | Domain / Application |
-| HTTP serialisation | `ApiResponse<T>` | Infrastructure (Hono handler) |
-| FE after fetch | Parse `ApiResponse` → `Result<T, ProblemDetail>` | UI adapter |
-
-```ts
-// Wire format — what goes over HTTP
-type ApiResponse<T> =
-  | { readonly status: "success"; readonly data: T }
-  | { readonly status: "error"; readonly error: ProblemDetail };
-```
-
-### 19.2 Bridging Result → ApiResponse in Hono Handlers
-
-The handler unwraps the internal `Result` and maps it to the wire format:
-
-```ts
-app.get("/orders/:id", async (c) => {
-  const result = await getOrderByIdHandler(c.req.param("id"));
-
-  if (isOk(result)) {
-    return c.json({ status: "success" as const, data: result.value });
-  }
-  // Maps DomainError → ProblemDetail
-  return problemResponse(c, result.error);
-});
-```
-
-### 19.3 Parsing ApiResponse → Result on the FE
-
-On the frontend, parse the wire format **back into** a `Result` so the rest of the FE code uses the same in-process pattern:
-
-```ts
-async function fetchApi<T>(
-  url: string,
-  schema: z.ZodType<T>,
-): Promise<Result<T, ProblemDetail>> {
-  const res = await httpClient.get(url);
-  if (isErr(res)) return res;
-
-  const body = ApiResponseSchema(schema).safeParse(res.value);
-  if (!body.success) return err({ type: "ParseError", title: "Invalid response", status: 0, traceId: "" });
-
-  return body.data.status === "success"
-    ? ok(body.data.data)
-    : err(body.data.error);
-}
-```
-
-### 19.4 RFC 7807 Problem Details for Errors
-
-All error responses use `application/problem+json`:
-
-```ts
-interface ProblemDetail {
-  readonly type: string;        // URI reference identifying the error type
-  readonly title: string;       // Short human-readable summary
-  readonly status: number;      // HTTP status code
-  readonly detail?: string;     // Explanation specific to this occurrence
-  readonly instance?: string;   // URI identifying this specific occurrence
-  readonly traceId: string;     // Correlation ID for debugging
-  readonly errors?: ReadonlyArray<{
-    readonly field: string;
-    readonly message: string;
-  }>;
-}
-
-// Hono helper — maps DomainError to the wire format
-function problemResponse(c: Context, error: DomainError): Response {
-  const status = domainErrorToHttpStatus(error);
-  return c.json(
-    {
-      status: "error" as const,
-      error: {
-        type: `https://api.example.com/errors/${error._tag}`,
-        title: error._tag,
-        status,
-        detail: error.message,
-        traceId: getTraceId(),
-      },
-    },
-    status,
-  );
-}
-```
-
----
-
-## 20. Cursor-Based Pagination
-
-Prefer **cursor/keyset** pagination over offset-based. Offset pagination degrades on large tables and produces inconsistent results under concurrent writes.
-
-```ts
-// Shared types
-interface CursorPage<T> {
-  readonly items: ReadonlyArray<T>;
-  readonly nextCursor: string | null;
-  readonly hasMore: boolean;
-}
-
-const PaginationParamsSchema = z.object({
-  cursor: z.string().optional(),
-  limit: z.coerce.number().int().min(1).max(100).catch(20),
-});
-type PaginationParams = z.infer<typeof PaginationParamsSchema>;
-
-// Drizzle query example
-async function listOrders(
-  params: PaginationParams,
-): Promise<CursorPage<Order>> {
-  const rows = await db
-    .select()
-    .from(orders)
-    .where(params.cursor ? gt(orders.id, params.cursor) : undefined)
-    .orderBy(asc(orders.id))
-    .limit(params.limit + 1); // fetch one extra to detect hasMore
-
-  const hasMore = rows.length > params.limit;
-  const items = hasMore ? rows.slice(0, -1) : rows;
-
-  return {
-    items,
-    nextCursor: items.at(-1)?.id ?? null,
-    hasMore,
-  };
-}
-```
-
----
-
-## 21. Data Integrity
-
-### 21.1 Optimistic Locking
-
-Use a `version` column on every mutable entity. Increment on every write. Return `409 Conflict` when the version in the `WHERE` clause matches zero rows.
-
-```ts
-// Drizzle example
-async function updateOrder(
-  id: OrderId,
-  data: UpdateOrderInput,
-  expectedVersion: number,
-): Promise<Result<Order, ConflictError | NotFoundError>> {
-  const result = await db
-    .update(orders)
-    .set({ ...data, version: expectedVersion + 1 })
-    .where(and(eq(orders.id, id), eq(orders.version, expectedVersion)))
-    .returning();
-
-  if (result.length === 0) {
-    const exists = await db.select({ id: orders.id }).from(orders).where(eq(orders.id, id));
-    return exists.length === 0
-      ? err(new NotFoundError("Order", id))
-      : err(new ConflictError("Order was modified by another request. Refresh and retry."));
-  }
-
-  return ok(result[0]!);
-}
-```
-
-### 21.2 Soft Deletes
-
-**Never hard-delete user data.** Use a `deletedAt` column.
-
-```ts
-// Schema
-const users = pgTable("users", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  email: text("email").notNull(),
-  deletedAt: timestamp("deleted_at"),
-  // ...
-});
-
-// All queries exclude soft-deleted rows by default
-const activeUsers = () =>
-  db.select().from(users).where(isNull(users.deletedAt));
-
-// "Delete" = set the timestamp
-const softDelete = (id: UserId) =>
-  db.update(users).set({ deletedAt: new Date() }).where(eq(users.id, id));
-```
-
-### 21.3 Audit Trail
-
-Log every mutation to an append-only audit table:
-
-```ts
-const auditLog = pgTable("audit_log", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  entityType: text("entity_type").notNull(),  // e.g. "Order"
-  entityId: text("entity_id").notNull(),
-  action: text("action").notNull(),            // "create" | "update" | "delete"
-  actorId: text("actor_id").notNull(),
-  before: jsonb("before"),                     // snapshot before mutation
-  after: jsonb("after"),                       // snapshot after mutation
-  timestamp: timestamp("timestamp").defaultNow().notNull(),
-  traceId: text("trace_id"),
-});
-```
-
-Write the audit row **in the same transaction** as the mutation.
-
-### 21.4 Outbox Pattern for Reliable Events
-
-When a domain event must trigger side effects (email, webhook, analytics), write the event to an `outbox` table **in the same DB transaction** as the mutation. A background poller or CDC (Change Data Capture) picks it up and publishes.
-
-```ts
-const outbox = pgTable("outbox", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  eventType: text("event_type").notNull(),
-  payload: jsonb("payload").notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  processedAt: timestamp("processed_at"),
-});
-
-// Inside a transaction:
-await db.transaction(async (tx) => {
-  await tx.insert(orders).values(newOrder);
-  await tx.insert(outbox).values({
-    eventType: "order.created",
-    payload: newOrder,
-  });
-});
-```
-
-This guarantees that either **both** the order and the event are persisted, or **neither** is — preventing lost or phantom events.
-
----
-
-## 22. HTTP Optimisation
-
-### 22.1 ETags & Conditional Requests
+### 7.4 ETags & Conditional Requests
 
 Return `ETag` headers on GET responses. Honour `If-None-Match` to return `304 Not Modified`.
 
@@ -1553,7 +844,7 @@ async function etagMiddleware(c: Context, next: Next) {
 }
 ```
 
-### 22.2 Compression
+### 7.5 Compression
 
 Enable Brotli / gzip for all responses. Use Hono's `compress` middleware:
 
@@ -1565,7 +856,7 @@ app.use("*", compress());
 
 For fine-grained control, set `Content-Encoding` conditionally based on `Accept-Encoding`.
 
-### 22.3 Request Coalescing / Deduplication
+### 7.6 Request Coalescing / Deduplication
 
 When multiple identical GET requests arrive simultaneously (thundering herd on cache miss), execute only once and share the result:
 
@@ -1591,7 +882,54 @@ async function getUser(id: UserId) {
 }
 ```
 
-### 22.4 AbortController Everywhere
+---
+
+## 8. Infrastructure
+
+### 8.1 Rate Limiting
+
+Apply at the infrastructure layer (reverse proxy / API gateway) **and** at the application layer as defense-in-depth.
+
+```ts
+// Application-level rate limiting (e.g. hono-rate-limiter or rate-limiter-flexible behind a façade)
+import type { RateLimiterConfig } from "./rateLimiter.port";
+
+const apiRateLimiter: RateLimiterConfig = {
+  windowMs: 60_000,
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => req.ip ?? "unknown",
+  handler: (_req, res) =>
+    res.status(429).json({
+      error: "Too many requests",
+      retryAfterMs: 60_000,
+    }),
+};
+```
+
+### 8.2 Load Balancing
+
+- Use a reverse proxy (NGINX, Caddy, or cloud ALB) in front of multiple Bun instances.
+- Ensure the app is **stateless** — all state lives in the DB / Redis / external store.
+- Health check endpoint: `GET /health` returns `200` with `{ status: "ok", uptime, version }`.
+
+### 8.3 Graceful Shutdown
+
+```ts
+async function gracefulShutdown(server: HttpServer, db: DatabaseClient): Promise<void> {
+  logger.info({ message: "Shutting down gracefully..." });
+  server.close();           // stop accepting new connections
+  await db.disconnect();    // drain DB pool
+  await cache.clear();      // optional
+  process.exit(0);
+}
+
+process.on("SIGTERM", () => gracefulShutdown(server, db));
+process.on("SIGINT", () => gracefulShutdown(server, db));
+```
+
+### 8.4 AbortController Everywhere
 
 Pass `AbortSignal` to **every** async operation. Cancel in-flight work on route change (FE) or request abort (BE).
 
@@ -1612,11 +950,20 @@ useEffect(() => {
 }, []);
 ```
 
+### 8.5 Resilience & Operational Patterns
+
+- **Timeouts on every external call** — HTTP, DB, Redis, third-party APIs. No indefinite waits.
+- **Retry with exponential backoff + jitter** for transient failures on external calls.
+- **Circuit breaker pattern** for third-party integrations that may go down — prevent cascade failures.
+- **Health check endpoint** (`GET /health`) returning service status, uptime, and dependency health.
+- **Structured concurrency** — use `Promise.allSettled` over `Promise.all` when partial failures are acceptable. Always handle every settled result.
+- **Dead letter queue** for failed async jobs — never silently drop messages.
+
 ---
 
-## 23. Hono-Specific Patterns
+## 9. Hono Patterns
 
-### 23.1 Type-Safe Routes with `hc` Client
+### 9.1 Type-Safe Routes with `hc` Client
 
 Leverage Hono's path-parameter inference and the `hc` RPC client for **end-to-end type-safe API calls without codegen**.
 
@@ -1645,7 +992,7 @@ const res = await client.users[":id"].$get({ param: { id: "123" } });
 const data = await res.json(); // { id: string; name: string } — inferred!
 ```
 
-### 23.2 Streaming Responses
+### 9.2 Streaming Responses
 
 Use `c.stream()` or `c.streamText()` for large payloads, AI responses, or server-sent events:
 
@@ -1664,7 +1011,7 @@ app.get("/export/orders", async (c) => {
 });
 ```
 
-### 23.3 Zod Validator Middleware
+### 9.3 Zod Validator Middleware
 
 Use `@hono/zod-validator` to validate request bodies, query params, and route params in a single declaration:
 
@@ -1685,9 +1032,170 @@ app.post(
 
 ---
 
-## 24. Frontend Performance
+# Part III — Frontend
 
-### 24.1 List Virtualisation
+---
+
+## 10. CSS & Responsive Design
+
+### 10.1 Mobile-First
+
+All CSS starts from the smallest viewport and adds complexity upward.
+
+```css
+/* Base: mobile */
+.card {
+  padding: var(--space-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* Tablet */
+@media (min-width: 48rem) {
+  .card {
+    flex-direction: row;
+    padding: var(--space-4);
+  }
+}
+
+/* Desktop */
+@media (min-width: 80rem) {
+  .card {
+    max-width: 60rem;
+    margin-inline: auto;
+  }
+}
+```
+
+### 10.2 Design Tokens as CSS Custom Properties
+
+```css
+:root {
+  /* Spacing scale */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 1rem;
+  --space-4: 1.5rem;
+  --space-5: 2rem;
+
+  /* Typography */
+  --font-sans: "Inter", system-ui, sans-serif;
+  --font-mono: "Fira Code", monospace;
+
+  /* Colors — semantic tokens */
+  --color-surface: hsl(0 0% 100%);
+  --color-on-surface: hsl(220 15% 15%);
+  --color-primary: hsl(220 90% 56%);
+  --color-error: hsl(0 72% 51%);
+
+  /* Radii */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+}
+```
+
+### 10.3 Rules
+
+- Prefer `rem` / `em` over `px`.
+- Use logical properties (`margin-inline`, `padding-block`).
+- Prefer `gap` over margins for flex/grid spacing.
+- Use `clamp()` for fluid typography: `font-size: clamp(1rem, 0.5rem + 1vw, 1.25rem)`.
+- No `!important` unless overriding third-party styles.
+- Use container queries (`@container`) for component-level responsiveness when supported.
+
+---
+
+## 11. Accessibility
+
+### 11.1 Non-Negotiable Rules
+
+- **Semantic HTML first** — use `<button>`, `<nav>`, `<main>`, `<article>`, `<dialog>`, etc.
+- **All interactive elements are keyboard-accessible** — visible `:focus-visible` ring.
+- **All images have `alt` text** — decorative images get `alt=""` and `aria-hidden="true"`.
+- **Form inputs have associated `<label>` elements** — never rely on placeholder alone.
+- **Colour contrast ≥ 4.5:1** for normal text (WCAG AA).
+- **No information conveyed by colour alone** — always add an icon or text label.
+- **ARIA only when HTML semantics are insufficient** — prefer native elements.
+- **Live regions** (`aria-live="polite"`, `role="alert"`) for dynamic content.
+- **Skip-to-content link** as the first focusable element.
+- **`prefers-reduced-motion` media query** — disable animations for users who request it:
+  ```css
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+  ```
+
+### 11.2 Automated Enforcement
+
+- Run `axe-core` checks in every Playwright E2E test.
+- Enable the `useSemanticElements`, `useValidAriaRole`, `useValidAriaValues`, and other a11y rules in **Biome**'s linter. Supplement with `@axe-core/playwright` in E2E.
+- Include a11y checks in CI: `pa11y-ci` or Lighthouse CI.
+
+---
+
+## 12. State Management
+
+### 12.1 Finite State Machines to Prevent Impossible States
+
+Use explicit state machines for any entity with a lifecycle. This eliminates invalid boolean combinations such as `{ isLoading: true, isError: true, data: [...] }`.
+
+```ts
+// ✅ Discriminated union — impossible states are unrepresentable
+type AsyncState<T, E = Error> =
+  | { readonly status: "idle" }
+  | { readonly status: "loading" }
+  | { readonly status: "success"; readonly data: T }
+  | { readonly status: "error"; readonly error: E };
+
+// ✅ Order lifecycle — only valid transitions are expressible
+type OrderState =
+  | { readonly status: "draft" }
+  | { readonly status: "placed"; readonly placedAt: ISODateString }
+  | { readonly status: "paid"; readonly paidAt: ISODateString; readonly paymentId: string }
+  | { readonly status: "shipped"; readonly shippedAt: ISODateString; readonly trackingNumber: string }
+  | { readonly status: "delivered"; readonly deliveredAt: ISODateString }
+  | { readonly status: "cancelled"; readonly cancelledAt: ISODateString; readonly reason: string };
+```
+
+### 12.2 State Transition Functions
+
+```ts
+type OrderEvent =
+  | { type: "PLACE" }
+  | { type: "PAY"; paymentId: string }
+  | { type: "SHIP"; trackingNumber: string }
+  | { type: "DELIVER" }
+  | { type: "CANCEL"; reason: string };
+
+function transition(state: OrderState, event: OrderEvent): Result<OrderState, DomainError> {
+  const now = new Date().toISOString() as ISODateString;
+  switch (state.status) {
+    case "draft":
+      if (event.type === "PLACE") return ok({ status: "placed", placedAt: now });
+      if (event.type === "CANCEL") return ok({ status: "cancelled", cancelledAt: now, reason: event.reason });
+      return err(new ValidationError(`Cannot ${event.type} a draft order`));
+    case "placed":
+      if (event.type === "PAY") return ok({ status: "paid", paidAt: now, paymentId: event.paymentId });
+      if (event.type === "CANCEL") return ok({ status: "cancelled", cancelledAt: now, reason: event.reason });
+      return err(new ValidationError(`Cannot ${event.type} a placed order`));
+    // ... exhaustive handling
+    default:
+      return assertNever(state);
+  }
+}
+```
+
+For complex UI state machines, consider using **XState** (via a façade — see §19).
+
+---
+
+## 13. UI Performance
+
+### 13.1 List Virtualisation
 
 For any list that **could** exceed ~50 visible items, use **virtualisation** (windowing). Render only the items in the viewport + a small overscan buffer.
 
@@ -1730,10 +1238,10 @@ function VirtualList({ items }: { items: ReadonlyArray<Item> }) {
 
 **Rules:**
 - Virtualise **tables, feeds, select dropdowns, and autocomplete results** when the potential item count is unbounded.
-- Pair with cursor-based pagination (§20) for infinite scroll.
+- Pair with cursor-based pagination (§12) for infinite scroll.
 - Always provide `estimateSize` — avoid layout thrashing.
 
-### 24.2 Optimistic Updates
+### 13.2 Optimistic Updates
 
 Apply mutations to the UI **immediately** before the server confirms, then reconcile.
 
@@ -1776,7 +1284,7 @@ async function toggleLike(postId: PostId, liked: boolean) {
 - Use optimistic updates for low-risk, high-frequency actions (likes, toggles, reordering).
 - For high-risk actions (payments, deletes), wait for server confirmation.
 
-### 24.3 Skeleton Loading States
+### 13.3 Skeleton Loading States
 
 **Never** show raw spinners. Use skeleton screens that match the layout of the content being loaded.
 
@@ -1803,7 +1311,7 @@ async function toggleLike(postId: PostId, liked: boolean) {
 }
 ```
 
-### 24.4 Web Vitals Monitoring
+### 13.4 Web Vitals Monitoring
 
 Capture Core Web Vitals (CLS, LCP, INP) and send to a dedicated endpoint:
 
@@ -1831,7 +1339,7 @@ onINP(sendVital);
 
 Alert when any metric regresses beyond the "good" threshold for > 5% of sessions.
 
-### 24.5 Performance Budgets
+### 13.5 Performance Budgets
 
 Set budgets in CI (Lighthouse CI or `bundlesize`):
 
@@ -1847,7 +1355,481 @@ Fail the pipeline if any budget is exceeded. Budgets are non-negotiable.
 
 ---
 
-## 25. Explicit Resource Management
+## 14. Frontend Error Reporting
+
+### 14.1 Send Critical FE Errors to a Dedicated Backend Endpoint
+
+```ts
+// src/ui/services/errorReporter.ts
+interface FrontendError {
+  readonly message: string;
+  readonly stack?: string;
+  readonly componentStack?: string;
+  readonly url: string;
+  readonly userAgent: string;
+  readonly timestamp: string;
+  readonly userId?: string;
+  readonly sessionId: string;
+  readonly metadata?: Record<string, unknown>;
+  readonly severity: "warning" | "error" | "fatal";
+}
+
+async function reportError(error: FrontendError): Promise<void> {
+  // Fire-and-forget with navigator.sendBeacon for reliability during page unload
+  const payload = JSON.stringify(error);
+
+  if (navigator.sendBeacon) {
+    navigator.sendBeacon("/api/v1/client-errors", payload);
+  } else {
+    // Fallback with fetch, no await — we don't want to block the UI
+    fetch("/api/v1/client-errors", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: payload,
+      keepalive: true,
+    }).catch(() => {
+      // Swallow — if error reporting itself fails, do not recurse
+    });
+  }
+}
+```
+
+### 14.2 Global Error Boundary (React)
+
+```tsx
+// Wrap the entire app; log to the endpoint above
+class GlobalErrorBoundary extends React.Component<Props, State> {
+  static getDerivedStateFromError(error: Error): State {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo): void {
+    reportError({
+      message: error.message,
+      stack: error.stack,
+      componentStack: errorInfo.componentStack ?? undefined,
+      url: window.location.href,
+      userAgent: navigator.userAgent,
+      timestamp: new Date().toISOString(),
+      sessionId: getSessionId(),
+      severity: "fatal",
+    });
+  }
+
+  render(): React.ReactNode {
+    if (this.state.hasError) {
+      return <FallbackErrorPage />;
+    }
+    return this.props.children;
+  }
+}
+```
+
+### 14.3 Also Catch Unhandled Promise Rejections & Global Errors
+
+```ts
+window.addEventListener("unhandledrejection", (event) => {
+  reportError({
+    message: `Unhandled rejection: ${event.reason}`,
+    stack: event.reason?.stack,
+    url: window.location.href,
+    userAgent: navigator.userAgent,
+    timestamp: new Date().toISOString(),
+    sessionId: getSessionId(),
+    severity: "error",
+  });
+});
+
+window.addEventListener("error", (event) => {
+  reportError({
+    message: event.message,
+    stack: event.error?.stack,
+    url: window.location.href,
+    userAgent: navigator.userAgent,
+    timestamp: new Date().toISOString(),
+    sessionId: getSessionId(),
+    severity: "error",
+  });
+});
+```
+
+---
+
+# Part IV — Cross-Cutting Concerns
+
+---
+
+## 15. Security
+
+### 15.1 Input & Output
+
+- **Validate all inputs** at trust boundaries (§4).
+- **Sanitise HTML output** — use a library like `DOMPurify` behind a façade.
+- **Parameterised queries only** — never concatenate user input into SQL. Drizzle handles this by default.
+- **Escape user-generated content** rendered in templates.
+
+### 15.2 Authentication & Authorization
+
+- **Short-lived JWTs** (15 min access token) + **long-lived refresh tokens** (HTTP-only, Secure, SameSite=Strict cookies).
+- **Rotate refresh tokens** on every use (rotation invalidates stolen tokens).
+- **bcrypt/argon2** for password hashing — never SHA/MD5.
+- **RBAC or ABAC** enforced at the **application layer**, not just the route level.
+- **Middleware guards** on every route — no "open by default".
+
+### 15.3 HTTP Security Headers
+
+Set via middleware or reverse proxy:
+
+```
+Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Referrer-Policy: strict-origin-when-cross-origin
+Permissions-Policy: camera=(), microphone=(), geolocation=()
+```
+
+### 15.4 Dependency Security
+
+- `bun audit` (or `bun pm pack --dry-run` + `socket.dev`) in CI — fail on **high** or **critical** vulnerabilities.
+- Pin exact versions in `bun.lock`.
+- Use `socket.dev` or `snyk` for supply-chain monitoring.
+
+### 15.5 Secrets
+
+- **Never** commit secrets. Use `.env` files (`.gitignore`'d) and inject via CI/CD.
+- Validate all env vars at startup with Zod (§3.3).
+- Rotate secrets regularly; support graceful key rotation (accept old + new simultaneously during rollout).
+
+### 15.6 CSRF Protection
+
+- Use **SameSite=Strict** cookies + CSRF tokens for state-changing requests.
+- For APIs consumed by SPAs, use the **double-submit cookie** pattern or **Origin header validation**.
+
+---
+
+## 16. Logging, Monitoring & Alerting
+
+### 16.1 Wide (Structured) Logs
+
+A "wide log" is a single structured event with **all relevant context** attached rather than multiple narrow log lines.
+
+```ts
+// src/shared/logging/logger.ts
+interface WideLogEvent {
+  readonly timestamp: string;
+  readonly level: "debug" | "info" | "warn" | "error";
+  readonly message: string;
+  readonly service: string;
+  readonly traceId: string;
+  readonly spanId?: string;
+  readonly userId?: string;
+  readonly requestId?: string;
+  readonly durationMs?: number;
+  readonly statusCode?: number;
+  readonly method?: string;
+  readonly path?: string;
+  readonly query?: Record<string, unknown>;
+  readonly error?: {
+    name: string;
+    message: string;
+    stack?: string;
+    code?: string;
+  };
+  readonly metadata?: Record<string, unknown>;
+}
+
+// Usage — one event per request, rich with context
+logger.info({
+  message: "Order created",
+  traceId,
+  userId: session.userId,
+  orderId: order.id,
+  itemCount: order.items.length,
+  totalCents: order.totalCents,
+  durationMs: Date.now() - startTime,
+  paymentProvider: "stripe",
+  idempotencyKey,
+});
+```
+
+### 16.2 Log Levels
+
+| Level | Use |
+|---|---|
+| `debug` | Detailed diagnostic info (disabled in production) |
+| `info` | Normal operational events: request handled, job completed |
+| `warn` | Recoverable issues: retry succeeded, cache miss, deprecated usage |
+| `error` | Failures requiring attention: unhandled rejection, integration failure |
+
+### 16.3 Alerting Rules (Examples)
+
+Configure in your monitoring platform (Datadog, Grafana, CloudWatch):
+
+| Alert | Condition | Severity |
+|---|---|---|
+| Error rate spike | `count(level=error) / count(*) > 5%` over 5 min | P1 |
+| Latency degradation | `p99(durationMs) > 2000` for 10 min | P2 |
+| Auth failures | `count(statusCode=401) > 50` in 5 min | P1 |
+| Rate limiting triggered | `count(statusCode=429) > 100` in 5 min | P2 |
+| Unhandled rejection | Any `unhandledRejection` or `uncaughtException` | P1 |
+| FE error spike | FE error report count > threshold | P2 |
+| DB connection pool exhaustion | Available connections < 2 for 1 min | P1 |
+
+### 16.4 Correlation
+
+- Generate a `traceId` (UUID v4) at the entry point of every request.
+- Propagate it via `AsyncLocalStorage` (Bun supports the Node.js `async_hooks` API) so every log within that request lifecycle includes it automatically.
+- FE includes a `requestId` header that maps to the BE `traceId`.
+
+---
+
+## 17. Testing Strategy
+
+### 17.1 Test Pyramid — Aim for 100% Code Coverage
+
+| Layer | Tool | Proportion | What It Covers |
+|---|---|---|---|
+| **Unit** | `bun:test` | ~70% | Pure functions, domain logic, value objects, utilities, state transitions |
+| **Integration** | `bun:test` + MSW + Testcontainers | ~20% | Use-case handlers with real adapters, DB queries, cross-module interactions |
+| **E2E** | Playwright | ~10% | Critical user journeys, happy + error paths through the full stack |
+
+### 17.2 Test-Driven Development (TDD) Cycle
+
+1. **Red** — Write a failing test that describes the desired behavior.
+2. **Green** — Write the minimal code to make the test pass.
+3. **Refactor** — Improve the code while keeping tests green.
+
+Every feature branch must include tests **before** or **alongside** implementation code.
+
+### 17.3 Unit Tests
+
+```ts
+// ✅ Test the Result path explicitly — errors are first-class
+describe("toEmail", () => {
+  it("accepts valid email", () => {
+    const result = toEmail("user@example.com");
+    expect(isOk(result)).toBe(true);
+  });
+
+  it("rejects missing @", () => {
+    const result = toEmail("invalid");
+    expect(isErr(result)).toBe(true);
+  });
+
+  it("rejects empty string", () => {
+    const result = toEmail("");
+    expect(isErr(result)).toBe(true);
+  });
+});
+```
+
+### 17.4 Integration Tests — Use MSW, Not Manual Mocks
+
+**Never** use `jest.mock()` or `mock.module()` to mock HTTP calls. Use **MSW** (Mock Service Worker) to intercept at the network level.
+
+```ts
+import { setupServer } from "msw/node";
+import { http, HttpResponse } from "msw";
+
+const server = setupServer(
+  http.get("https://api.example.com/users/:id", ({ params }) =>
+    HttpResponse.json({ id: params.id, name: "Alice" })
+  )
+);
+
+beforeAll(() => server.listen({ onUnhandledRequest: "error" }));
+afterEach(() => server.resetHandlers());
+afterAll(() => server.close());
+
+it("fetches user through the façade", async () => {
+  const result = await userService.getById("123");
+  expect(isOk(result)).toBe(true);
+  if (isOk(result)) expect(result.value.name).toBe("Alice");
+});
+```
+
+### 17.5 E2E Tests (Playwright)
+
+```ts
+test("user can complete checkout", async ({ page }) => {
+  await page.goto("/products");
+  await page.getByRole("button", { name: /add to cart/i }).first().click();
+  await page.getByRole("link", { name: /cart/i }).click();
+  await page.getByRole("button", { name: /checkout/i }).click();
+  await expect(page.getByText(/order confirmed/i)).toBeVisible();
+});
+```
+
+### 17.6 Snapshot Tests for Frequently Changing Output
+
+Use snapshots **only** for outputs that change often and are tedious to assert field-by-field (e.g., serialised API responses, rendered component trees). Keep snapshots small and focused. Update with `--update` flag when intentional changes occur.
+
+```ts
+it("serialises order DTO", () => {
+  const dto = toOrderDTO(testOrder);
+  expect(dto).toMatchSnapshot();
+});
+```
+
+### 17.7 Testing Error Paths
+
+Every test suite must cover:
+- **Happy path**
+- **Validation failures** (bad input)
+- **Not-found / empty-state**
+- **Authorization denied**
+- **Network failures** (MSW returning 500 or timeout)
+- **Concurrent / race conditions** where applicable
+
+---
+
+## 18. Code Style & Patterns
+
+### 18.1 Prefer FP, Use OOP When It Makes Sense
+
+- **Default to pure functions** with explicit inputs and outputs.
+- Use **OOP** for entities with identity and lifecycle (domain entities, state machines, cache instances).
+- Avoid classes for stateless logic — a plain function is simpler.
+
+### 18.2 Specific Rules
+
+```ts
+// ❌ Useless temporary variable
+const items = getItems();
+return items;
+
+// ✅ Direct return
+return getItems();
+
+// ❌ Imperative transformation
+const names: string[] = [];
+for (const user of users) {
+  names.push(user.name);
+}
+
+// ✅ Declarative
+const names = users.map((user) => user.name);
+
+// ❌ Mutation
+user.name = "Alice";
+
+// ✅ Copy
+const updatedUser = { ...user, name: "Alice" };
+
+// ❌ Null checks scattered everywhere
+if (user !== null && user !== undefined) { ... }
+
+// ✅ Optional chaining + nullish coalescing
+const name = user?.name ?? "Anonymous";
+
+// ✅ Pipeline style (when readability improves)
+const activeAdminEmails = users
+  .filter((u) => u.isActive)
+  .filter((u) => u.role === "admin")
+  .map((u) => u.email);
+```
+
+### 18.3 Immutability
+
+- Mark all function parameters as `readonly` when possible.
+- Use `ReadonlyDeep` from `type-fest` for domain types.
+- Use `Object.freeze()` for runtime immutability of configuration objects.
+- Prefer `ReadonlyArray<T>` over `T[]` in type signatures.
+- Prefer `ReadonlyMap` and `ReadonlySet` over mutable counterparts.
+
+### 18.4 Patterns to Use
+
+| Pattern | When |
+|---|---|
+| **Façade** | Wrap every external library (§19) |
+| **Repository** | Abstract data access behind a port interface |
+| **Factory** | Complex object construction, especially for domain entities |
+| **Strategy** | Swappable algorithms (payment providers, notification channels) |
+| **Observer / Event Emitter** | Domain events (order placed → send email, update inventory) |
+| **Builder** | Complex query construction, test fixtures |
+| **Decorator** | Cross-cutting concerns (logging, caching, auth) |
+| **State Machine** | Entity lifecycle (§12) |
+
+### 18.5 Anti-Patterns to Avoid
+
+| Anti-Pattern | Correct Alternative |
+|---|---|
+| God class / God module | Split by single responsibility |
+| Barrel files (`index.ts` re-exporting everything) | Import directly from the source module |
+| `any` type | `unknown` + type narrowing |
+| Nested `try/catch` | `Result` type composition |
+| Boolean flags for state | Discriminated unions / state machines |
+| Mutable global state | Dependency injection, `AsyncLocalStorage` |
+| Magic strings / numbers | Constants, enums, branded types |
+| Prop drilling > 2 levels | Context / composition / dependency injection |
+| `useEffect` for data fetching | React Query / SWR (behind a façade) |
+| Over-mocking in tests | MSW for network; real instances for domain logic |
+| Premature optimisation | Measure first, optimise second |
+| Circular dependencies | Restructure modules, use dependency inversion |
+
+---
+
+## 19. Dependency Management & Façades
+
+### 19.1 Façade Every External Library
+
+Every external dependency — including "staples" like React, Zod, Drizzle, ky — is accessed through a **thin façade**. This provides:
+
+1. **Replaceability** — swap the underlying library without touching feature code.
+2. **Testability** — mock the façade interface in tests.
+3. **Consistent API** — normalise quirks and enforce project conventions.
+
+```
+src/shared/lib/
+  http/
+    httpClient.port.ts        # interface
+    kyHttpClient.ts           # adapter (default)
+    fetchHttpClient.ts        # alternative adapter
+    httpClient.facade.ts      # factory that returns the active adapter
+  validation/
+    validator.port.ts
+    zodValidator.ts
+  orm/
+    orm.port.ts
+    drizzleOrm.ts
+  ui/
+    uiFramework.port.ts       # abstracts React-specific APIs
+    reactUiFramework.ts
+  state/
+    stateMachine.port.ts
+    xstateStateMachine.ts
+  cache/
+    cache.port.ts
+    redisCache.ts
+    inMemoryCache.ts
+```
+
+### 19.2 Example: HTTP Client Façade
+
+```ts
+// src/shared/lib/http/httpClient.port.ts
+interface HttpClient {
+  get<T>(url: string, options?: RequestOptions): Promise<Result<T, HttpError>>;
+  post<T>(url: string, body: unknown, options?: RequestOptions): Promise<Result<T, HttpError>>;
+  put<T>(url: string, body: unknown, options?: RequestOptions): Promise<Result<T, HttpError>>;
+  delete<T>(url: string, options?: RequestOptions): Promise<Result<T, HttpError>>;
+}
+
+interface RequestOptions {
+  readonly headers?: Readonly<Record<string, string>>;
+  readonly params?: Readonly<Record<string, string>>;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}
+
+// src/shared/lib/http/kyHttpClient.ts — implements HttpClient using ky
+// Feature code only imports HttpClient, never ky directly
+```
+
+---
+
+## 20. Explicit Resource Management
 
 Use the `using` keyword (TC39 Explicit Resource Management, TS 5.2+) for any resource that must be cleaned up: DB connections, file handles, temp files, locks.
 
@@ -1885,31 +1867,100 @@ async function processUpload(file: File) {
 
 ---
 
-## 26. Checklist Before Every PR
+# Part V — Reference
 
-- [ ] All new code is covered by tests (unit + integration as appropriate).
-- [ ] Error paths are tested explicitly.
-- [ ] `Result` type used for recoverable errors — no `try/catch` for expected failures.
-- [ ] Zod schemas validate all trust boundaries.
-- [ ] Optional Zod fields use `.catch()` with sane defaults.
+---
+
+## 21. Recommended Libraries
+
+**Runtime & Server**
+
+| Category | Library | Rationale |
+|---|---|---|
+| **Runtime & Package Manager** | `bun` | Fast runtime, built-in test runner, drop-in Node.js replacement |
+| **Server framework** | `hono` | Lightweight, edge-ready, type-safe routes + `hc` RPC client |
+| **Hono validation** | `@hono/zod-validator` | Request validation middleware with Zod type inference |
+
+**Backend**
+
+| Category | Library | Rationale |
+|---|---|---|
+| **ORM** | `drizzle-orm` + `drizzle-kit` (via façade) | Type-safe, SQL-like API, lightweight, schema-as-code |
+| **Logging** | `pino` (via façade) | Fast, structured JSON logging |
+| **Rate limiting** | `rate-limiter-flexible` | In-memory + Redis support |
+| **Sanitisation** | `DOMPurify` (via façade) | XSS prevention |
+
+**Frontend**
+
+| Category | Library | Rationale |
+|---|---|---|
+| **Virtualisation** | `@tanstack/react-virtual` (via façade) | Windowed rendering for large lists, tables, grids |
+| **Web Vitals** | `web-vitals` | Measure CLS, LCP, INP; report to monitoring |
+
+**Testing**
+
+| Category | Library | Rationale |
+|---|---|---|
+| **API mocking** | `msw` | Network-level interception for tests |
+| **Testing** | `bun:test` | Built-in, Jest-compatible API, fast |
+| **E2E** | `playwright` | Cross-browser, reliable |
+| **Coverage** | `v8` (via `bun:test --coverage`) | Native V8 coverage, fast |
+
+**Types & Utilities**
+
+| Category | Library | Rationale |
+|---|---|---|
+| **Utility Types** | `type-fest` | Rich type utilities; do not re-invent |
+| **Validation** | `zod` (via façade) | Runtime + static type inference |
+| **HTTP** | `ky` (via façade) | Retry, timeout, hooks, tiny bundle |
+| **State machines** | `xstate` (via façade) | Formal statecharts |
+| **Data structures** | `mnemonist` or `immutable` | Battle-tested advanced data structures |
+| **Date/time** | `temporal` polyfill or `date-fns` (via façade) | Immutable, tree-shakeable |
+| **Env parsing** | `zod` (built-in, §4.3) | Fail-fast env validation |
+| **ID generation** | `nanoid` or `uuid` | Collision-resistant IDs |
+
+**Code Quality**
+
+| Category | Library | Rationale |
+|---|---|---|
+| **a11y lint** | Biome built-in a11y rules | Catches a11y issues at lint time (no extra plugin) |
+| **a11y test** | `@axe-core/playwright` | Runtime a11y checks in E2E |
+| **CSS lint** | `stylelint` | Enforce CSS conventions |
+| **Linting + Formatting** | `biome` | Lint + format in one tool; extremely fast, no config sprawl |
+| **Git hooks** | `husky` + Biome `--staged` flag | Pre-commit quality gates |
+
+> **Rule:** Before writing any non-trivial data structure or algorithm from scratch, search for a well-maintained library (`bun add`). Prefer installing `mnemonist` over hand-rolling an AVL tree, LRU cache, or trie.
+
+---
+
+## 22. Checklist Before Every PR
+
+**Types & Validation**
+
 - [ ] No `any` — use `unknown` + narrowing.
 - [ ] All types inferred from source of truth (Zod, Drizzle, `as const`).
 - [ ] Branded types with predicates for domain identifiers.
 - [ ] Exhaustiveness checking with `assertNever` on discriminated unions.
 - [ ] `ReadonlyDeep` on domain types.
-- [ ] CSS is mobile-first; no `px` for layout; uses design tokens.
-- [ ] a11y: semantic HTML, labels, contrast, keyboard nav.
-- [ ] Security: no secrets in code, CSP headers, parameterised queries.
-- [ ] Wide structured logs with `traceId` on all operations.
+- [ ] Zod schemas validate all trust boundaries.
+- [ ] Optional Zod fields use `.catch()` with sane defaults.
+- [ ] API errors use RFC 7807 `ProblemDetail` format.
+
+**Error Handling**
+
+- [ ] Error paths are tested explicitly.
+- [ ] `Result` type used for recoverable errors — no `try/catch` for expected failures.
+- [ ] FE critical errors report to `/api/v1/client-errors`.
+
+**Testing**
+
+- [ ] All new code is covered by tests (unit + integration as appropriate).
 - [ ] HTTP mocks use MSW, not `mock.module()`.
-- [ ] External libraries accessed through façades.
-- [ ] State machines for entities with lifecycle.
+
+**Backend**
+
 - [ ] Idempotency-Key on mutating endpoints.
 - [ ] In-memory cache in front of repeated GET / DB reads.
-- [ ] No useless temp variables; prefer direct returns and FP chaining.
-- [ ] FE critical errors report to `/api/v1/client-errors`.
-- [ ] No high/critical vulnerabilities (use `socket.dev` or equivalent supply-chain scanning).
-- [ ] API errors use RFC 7807 `ProblemDetail` format.
 - [ ] All list endpoints use cursor-based pagination.
 - [ ] Mutable entities have `version` column (optimistic locking).
 - [ ] No hard deletes — use `deletedAt` soft-delete.
@@ -1919,26 +1970,36 @@ async function processUpload(file: File) {
 - [ ] Response compression (Brotli/gzip) enabled.
 - [ ] `AbortSignal` propagated through all async chains.
 - [ ] Hono routes use `hc<AppType>` for type-safe FE client.
+
+**Frontend**
+
+- [ ] CSS is mobile-first; no `px` for layout; uses design tokens.
 - [ ] Large lists (> 50 items) are virtualised.
 - [ ] Optimistic updates have rollback logic on failure.
 - [ ] Skeleton loading states — no raw spinners.
 - [ ] Web Vitals (CLS, LCP, INP) reported to monitoring.
 - [ ] Performance budgets enforced in CI.
+
+**Security**
+
+- [ ] Security: no secrets in code, CSP headers, parameterised queries.
+- [ ] No high/critical vulnerabilities (use `socket.dev` or equivalent supply-chain scanning).
+
+**Code Quality & Operations**
+
+- [ ] Wide structured logs with `traceId` on all operations.
+- [ ] External libraries accessed through façades.
+- [ ] State machines for entities with lifecycle.
+- [ ] No useless temp variables; prefer direct returns and FP chaining.
 - [ ] `using` / `await using` for resources requiring cleanup.
 
 ---
 
-## Appendix A: Additional Claude-Specific Directives
+## 23. Project Configuration
 
-1. **When generating a new feature**, scaffold the full feature folder first (domain, commands, queries, ports, adapters, validation, `__tests__/`).
-2. **When modifying existing code**, read and understand the surrounding context before editing. Do not break existing patterns.
-3. **Never generate dead code** — every line must be reachable and tested.
-4. **Prefer composition over inheritance.**
-5. **Every public function must have a JSDoc comment** explaining purpose, params, return value, and thrown/returned errors.
-6. **File length limit: 300 lines.** If a file exceeds this, split by responsibility.
-7. **No default exports** — named exports only, for better refactoring and grep-ability.
-8. **Strict TypeScript config:**
-   ```jsonc
+### 23.1 Strict TypeScript Config
+
+```jsonc
    {
      "compilerOptions": {
        "strict": true,
@@ -1952,13 +2013,28 @@ async function processUpload(file: File) {
      }
    }
    ```
-9. **Biome** must be configured with the `recommended` + `all` ruleset and run on pre-commit (via `husky` + `biome check --staged`).
-10. **Every API endpoint must be documented** with OpenAPI / Swagger annotations or a co-located `.schema.ts` file.
-11. **Database migrations must be reversible** — every `up` migration has a corresponding `down`.
-12. **Feature flags** for risky deployments — wrap new behaviour behind flags, not branches.
-13. **Timeouts on every external call** — HTTP, DB, Redis, third-party APIs. No indefinite waits.
-14. **Retry with exponential backoff + jitter** for transient failures on external calls.
-15. **Circuit breaker pattern** for third-party integrations that may go down — prevent cascade failures.
-16. **Health check endpoint** (`GET /health`) returning service status, uptime, and dependency health.
-17. **Structured concurrency** — use `Promise.allSettled` over `Promise.all` when partial failures are acceptable. Always handle every settled result.
-18. **Dead letter queue** for failed async jobs — never silently drop messages.
+
+### 23.2 Biome Configuration
+
+**Biome** must be configured with the `recommended` + `all` ruleset and run on pre-commit (via `husky` + `biome check --staged`).
+
+---
+
+## 24. Operational Directives
+
+1. **When generating a new feature**, scaffold the full feature folder first (domain, commands, queries, ports, adapters, validation, `__tests__/`).
+2. **When modifying existing code**, read and understand the surrounding context before editing. Do not break existing patterns.
+3. **Never generate dead code** — every line must be reachable and tested.
+4. **Prefer composition over inheritance.**
+5. **Every public function must have a JSDoc comment** explaining purpose, params, return value, and thrown/returned errors.
+6. **File length limit: 300 lines.** If a file exceeds this, split by responsibility.
+7. **No default exports** — named exports only, for better refactoring and grep-ability.
+8. **Every API endpoint must be documented** with OpenAPI / Swagger annotations or a co-located `.schema.ts` file.
+9. **Database migrations must be reversible** — every `up` migration has a corresponding `down`.
+10. **Feature flags** for risky deployments — wrap new behaviour behind flags, not branches.
+11. **Timeouts on every external call** — HTTP, DB, Redis, third-party APIs. No indefinite waits.
+12. **Retry with exponential backoff + jitter** for transient failures on external calls.
+13. **Circuit breaker pattern** for third-party integrations that may go down — prevent cascade failures.
+14. **Health check endpoint** (`GET /health`) returning service status, uptime, and dependency health.
+15. **Structured concurrency** — use `Promise.allSettled` over `Promise.all` when partial failures are acceptable. Always handle every settled result.
+16. **Dead letter queue** for failed async jobs — never silently drop messages.
